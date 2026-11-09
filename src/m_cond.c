@@ -3816,6 +3816,8 @@ INT32 M_UnlockableSkinNum(unlockable_t *unlock)
 			unlock->stringVarCache = skinnum;
 			return skinnum;
 		}
+		// That character is not loaded; it used to fall through and, with variable=0, locked Sonic.
+		return -1;
 	}
 
 	if (unlock->variable >= 0 && unlock->variable < numskins)

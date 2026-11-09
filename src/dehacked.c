@@ -212,7 +212,9 @@ static void DEH_LoadDehackedFile(MYFILE *f, boolean mainfile)
 			if (fastcmp(word, "FREESLOT"))
 			{
 				// This is not a major mod.
+				CONS_Printf("dehacked: calling readfreeslots\n");
 				readfreeslots(f);
+				CONS_Printf("dehacked: readfreeslots returned\n");
 				continue;
 			}
 			else if (fastcmp(word, "MAINCFG"))

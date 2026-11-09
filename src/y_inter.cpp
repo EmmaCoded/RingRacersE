@@ -1152,7 +1152,7 @@ void Y_RoundQueueDrawer(y_data_t *standings, INT32 offset, boolean doanimations,
 
 	if (adminmode)
 	{
-		totalsteps = std::min(workingqueuesize + (menuqueue.size - menusendoffset), ROUNDQUEUE_MAX);
+		totalsteps = std::min<INT32>(workingqueuesize + (menuqueue.size - menusendoffset), ROUNDQUEUE_MAX);
 	}
 	else
 	{

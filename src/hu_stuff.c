@@ -256,6 +256,8 @@ void HU_Init(void)
 	Setup fonts
 	*/
 
+// Fonts are ESSENTIAL (without them any menu/HUD text
+// dereferences NULL patches). They are loaded again.
 	if (!dedicated)
 	{
 #define  DIM( s, n ) ( font.start = s, font.size = n )

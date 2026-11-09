@@ -120,11 +120,16 @@ void SV_LoadBans(void)
 	}
 	catch (const std::exception& ex)
 	{
-		const char* gdfolder = "the Ring Racers folder";
-		if (strcmp(srb2home, "."))
-			gdfolder = srb2home;
-
-		I_Error("%s\nNot a valid ban file.\nDelete %s (maybe in %s) and try again.", ex.what(), BANFILE, gdfolder);
+		// A power outage can leave the file full of zeros. Instead of
+		// closing the game, it is moved aside as .bad and the game goes on without bans.
+		srb2::String badpath = banspath + ".bad";
+		try { bis.stream().close(); } catch (...) {} // close before renaming (Windows)
+		remove(badpath.c_str());
+		if (rename(banspath.c_str(), badpath.c_str()) == 0)
+			CONS_Alert(CONS_WARNING, "%s: %s. Not a valid ban file, moved to %s.bad\n", BANFILE, ex.what(), BANFILE);
+		else
+			CONS_Alert(CONS_WARNING, "%s: %s. Not a valid ban file, ignored\n", BANFILE, ex.what());
+		return;
 	}
 
 	if (!object.is_object())
@@ -134,7 +139,7 @@ void SV_LoadBans(void)
 
 	try
 	{
-		if (object.value("version", 1) == 1)
+		if (object.value("version", static_cast<int32_t>(1)) == static_cast<int32_t>(1))
 		{
 			JsonValue& array = object.at("bans");
 
@@ -154,7 +159,7 @@ void SV_SaveBans(void)
 {
 	JsonValue object = JsonValue(JsonObject());
 
-	object["version"] = 1;
+	object["version"] = static_cast<int32_t>(1);
 	JsonValue& array_value = object["bans"];
 
 	array_value = JsonValue(JsonArray());

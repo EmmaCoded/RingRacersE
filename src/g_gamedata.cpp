@@ -23,6 +23,7 @@
 #include "m_argv.h"
 #include "m_cond.h"
 #include "g_game.h"
+#include "i_system.h" // I_GetPreciseTime
 #include "r_skins.h"
 #include "z_zone.h"
 
@@ -284,6 +285,7 @@ void srb2::save_ng_gamedata()
 			return;
 		}
 	}
+
 
 	try
 	{

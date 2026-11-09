@@ -292,7 +292,7 @@ static void I_ShowErrorMessageBox(const char *messagefordevelopers, boolean dump
 	static char finalmessage[2048];
 	size_t firstimpressionsline = 3; // "Dr Robotnik's Ring Racers" has encountered...
 
-	if (M_CheckParm("-dedicated"))
+	if (M_CheckParm("-dedicated") || M_CheckParm("-nomsgbox"))
 		return;
 
 	snprintf(
@@ -371,7 +371,7 @@ static void I_ShowErrorMessageBox(const char *messagefordevelopers, boolean dump
 	// which should fail gracefully if it can't put a message box up
 	// on the target system
 	SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,
-		"Dr. Robotnik's Ring Racers " VERSIONSTRING " Error",
+		"Ring Racers E v2.4E Error",
 		finalmessage, NULL);
 
 	// Note that SDL_ShowSimpleMessageBox does *not* require SDL to be
@@ -380,6 +380,10 @@ static void I_ShowErrorMessageBox(const char *messagefordevelopers, boolean dump
 	// fullscreen window is closed before displaying the error message
 	// in case the fullscreen window blocks it for some absurd reason.
 }
+
+#if !(defined (__unix__) || defined(__APPLE__) || defined (UNIXCOMMON))
+static void Shittylogcopy(void); // defined below: copies latest-log.txt to logs/log-DATE.txt
+#endif
 
 static void I_ReportSignal(int num, int coredumped, void* tracefromcpptrace)
 {
@@ -543,6 +547,11 @@ static void I_ReportSignal(int num, int coredumped, void* tracefromcpptrace)
 	sigmsg = msg;
 
 	I_OutputMsg("\nProcess killed by signal: %s\n\n", sigmsg);
+#if defined(LOGMESSAGES) && !(defined (__unix__) || defined(__APPLE__) || defined (UNIXCOMMON))
+	// On a crash the dated log is saved too (before, it was only done on a clean exit)
+	if (logstream)
+		Shittylogcopy();
+#endif
 
 	I_ShowErrorMessageBox(sigmsg,
 #if defined (UNIXBACKTRACE)
@@ -1965,7 +1974,7 @@ FUNCIERROR void ATTRNORETURN I_Error(const char *error, ...)
 			extern consvar_t cv_fuzz;
 			if (!M_CheckParm("-dedicated") && !(cv_fuzz.value))
 				SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR,
-					"Dr. Robotnik's Ring Racers " VERSIONSTRING " Recursive Error",
+					"Ring Racers E v2.4E Recursive Error",
 					buffer, NULL);
 
 			W_Shutdown();

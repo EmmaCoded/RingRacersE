@@ -290,9 +290,15 @@ void readfreeslots(MYFILE *f)
 					}
 					// Found a free slot!
 					strncpy(sprnames[i],word,4);
-					//sprnames[i][4] = 0;
-					CONS_Printf("Sprite SPR_%s allocated.\n",word);
+					{
+						char word_copy[5];
+						strncpy(word_copy, word, 4);
+						word_copy[4] = '\0';
+						I_OutputMsg("Sprite SPR_%s allocated.\n", word_copy);
+						I_OutputMsg("A\n");
+					}
 					used_spr[(i-SPR_FIRSTFREESLOT)/8] |= 1<<(i%8); // Okay, this sprite slot has been named now.
+					I_OutputMsg("B\n");
 					break;
 				}
 				if (i > SPR_LASTFREESLOT)
@@ -402,7 +408,9 @@ void readfreeslots(MYFILE *f)
 		}
 	} while (!myfeof(f)); // finish when the line is empty
 
+	CONS_Printf("readfreeslots: done, freeing s\n");
 	Z_Free(s);
+	CONS_Printf("readfreeslots: return\n");
 }
 
 void readthing(MYFILE *f, INT32 num)

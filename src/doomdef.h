@@ -54,6 +54,7 @@
 #include <sys/stat.h>
 #include <ctype.h>
 
+
 #ifdef _WIN32
 #include <io.h>
 #endif
@@ -93,6 +94,14 @@ extern char logfilename[1024];
 
 /* A mod name to further distinguish versions. */
 #define SRB2APPLICATION "RingRacers"
+
+/* Ring Racers E: name the CLIENT sends when asking to join. Different from the original so that
+   E ONLY plays with other E builds (different files and logic). Lua and serverinfo still use SRB2APPLICATION. */
+#define RR_NETAPP "RingRacersE"
+/* Subversion the E server announces in serverinfo: the official 2.4 one (E is 2.5 internally).
+   That way the original Ring Racers 2.4 does not silently discard it: it gets to ask to join and receives the
+   "This is a Ring Racers E game" notice. The E client expects this same number. */
+#define RR_NETINFO_SUBVERSION 4
 
 //#define DEVELOP // Disable this for release builds to remove excessive cheat commands and enable MD5 checking and stuff, all in one go. :3
 #ifdef DEVELOP

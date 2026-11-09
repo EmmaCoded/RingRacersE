@@ -80,6 +80,7 @@
 #include "v_video.h"
 #include "f_finale.h"
 #include "k_hud.h"
+#include "rr_nete.h" // Ring Racers E: online only between E builds, networked low-end mode
 
 #ifdef HAVE_DISCORDRPC
 #include "discord.h"
@@ -881,7 +882,11 @@ static inline void CL_DrawConnectionStatus(void)
 			}
 
 			V_DrawCenteredString(BASEVIDWIDTH/2, BASEVIDHEIGHT-58-30, 0,
+#ifdef HAVE_CURL
 				va(M_GetText("%s downloading"), ((cl_mode == CL_DOWNLOADHTTPFILES) ? "\x82""HTTP" : "\x85""Direct")));
+#else // builds without curl
+				va(M_GetText("%s downloading"), "\x85""Direct"));
+#endif
 			V_DrawCenteredString(BASEVIDWIDTH/2, BASEVIDHEIGHT-58-22, V_YELLOWMAP,
 				va(M_GetText("\"%s\""), tempname));
 			V_DrawString(BASEVIDWIDTH/2-128, BASEVIDHEIGHT-58, V_20TRANS|V_MONOSPACE,
@@ -966,7 +971,7 @@ static boolean CL_SendJoin(void)
 	netbuffer->u.clientcfg.packetversion = PACKETVERSION;
 	netbuffer->u.clientcfg.version = VERSION;
 	netbuffer->u.clientcfg.subversion = SUBVERSION;
-	strncpy(netbuffer->u.clientcfg.application, SRB2APPLICATION,
+	strncpy(netbuffer->u.clientcfg.application, RR_NETAPP,
 			sizeof netbuffer->u.clientcfg.application);
 
 	for (i = 0; i <= splitscreen; i++)
@@ -1060,6 +1065,8 @@ static boolean CL_SendJoin(void)
 		memcpy(&netbuffer->u.clientcfg.challengeResponse[i], signature, sizeof(signature));
 	}
 
+	netbuffer->u.clientcfg.rrlowend = cv_rrlowend.value ? 1 : 0; // the E server decides with this
+
 	return HSendPacket(servernode, false, 0, sizeof (clientconfig_pak));
 }
 
@@ -1088,7 +1095,7 @@ static void SV_SendServerInfo(INT32 node, tic_t servertime)
 	netbuffer->u.serverinfo.packetversion = PACKETVERSION;
 
 	netbuffer->u.serverinfo.version = VERSION;
-	netbuffer->u.serverinfo.subversion = SUBVERSION;
+	netbuffer->u.serverinfo.subversion = RR_NETINFO_SUBVERSION; // see doomdef.h
 
 	memcpy(netbuffer->u.serverinfo.commit,
 			comprevision_abbrev_bin, GIT_SHA_ABBREV);
@@ -1120,6 +1127,7 @@ static void SV_SendServerInfo(INT32 node, tic_t servertime)
 		(gamespeed & SV_SPEEDMASK) |
 		(dedicated ? SV_DEDICATED : 0) |
 		(cv_voice_allowservervoice.value ? SV_VOICEENABLED : 0)
+		| SV_RRE | (cv_rrnetlowend.value ? SV_RRLOWEND : 0) // Ring Racers E
 	);
 
 	D_ParseCarets(netbuffer->u.serverinfo.servername, cv_servername.string, MAXSERVERNAME);
@@ -1646,11 +1654,14 @@ static boolean SL_InsertServer(serverinfo_pak* info, SINT8 node)
 		if (info->version != VERSION)
 			return false; // Not same version.
 
-		if (info->subversion != SUBVERSION)
+		if (info->subversion != RR_NETINFO_SUBVERSION)
 			return false; // Close, but no cigar.
 
 		if (strcmp(info->application, SRB2APPLICATION))
 			return false; // that's a different mod
+
+		if (!(info->kartvars & SV_RRE))
+			return false; // original Ring Racers (not E): cannot play with it
 	}
 
 	const INT32 gtidentifier = G_GetGametypeByName(info->gametypename);
@@ -1946,6 +1957,14 @@ static boolean CL_ServerConnectionSearchTicker(tic_t *asksent)
 {
 	INT32 i;
 
+	// The server we joined by IP is not Ring Racers E
+	if (client && RRNet_WrongServer())
+	{
+		Command_ExitGame_f();
+		RRNet_ShowWrongServer();
+		return false;
+	}
+
 	// serverlist is updated by GetPacket function
 	if (serverlistcount > 0)
 	{
@@ -1968,6 +1987,9 @@ static boolean CL_ServerConnectionSearchTicker(tic_t *asksent)
 		{
 			serverisfull = true;
 		}
+
+		if (client) // warn on join if the server's low-end mode does not match ours
+			RRNet_ClientFoundServer((serverlist[i].info.kartvars & SV_RRLOWEND) ? 1 : 0);
 
 		if (client)
 		{
@@ -3549,6 +3571,7 @@ void D_ClientServerInit(void)
 
 static void ResetNode(INT32 node)
 {
+	RRNet_SetNodeLowEnd(node, 0);
 	nodeingame[node] = false;
 	nodewaiting[node] = 0;
 	nodeneedsauth[node] = false;
@@ -4150,6 +4173,9 @@ static boolean SV_AddWaitingPlayers(SINT8 node, UINT8 *availabilities, player_co
 
 			playerpernode[node]++;
 
+			// BEFORE XD_ADDPLAYER (same buffer, same order): flag whether this low-end player
+			// must wait as a spectator until the round ends (the host is not in low-end mode yet)
+			RRNet_BeforeAddPlayer(node, newplayernum);
 			SendNetXCmd(XD_ADDPLAYER, buf, buf_p - buf);
 			DEBFILE(va("Server added player %d node %d\n", newplayernum, node));
 		}
@@ -4299,13 +4325,10 @@ boolean SV_SpawnServer(void)
 				I_NetOpenSocket();
 			}
 
-			if (cv_advertise.value)
-			{
-				RegisterServer();
-			}
 
 			ourIP = 0;
 			STUN_bind(GotOurIP);
+			RRNet_ServerStart(); // the game's low-end mode = the host's
 		}
 
 		// non dedicated server just connect to itself
@@ -4530,10 +4553,11 @@ static void HandleConnect(SINT8 node)
 	{
 		SV_SendRefuse(node, "Incompatible packet formats.");
 	}
-	else if (strncmp(netbuffer->u.clientcfg.application, SRB2APPLICATION,
+	else if (strncmp(netbuffer->u.clientcfg.application, RR_NETAPP,
 				sizeof netbuffer->u.clientcfg.application))
 	{
-		SV_SendRefuse(node, "Different Ring Racers modifications\nare not compatible.");
+		// The original Ring Racers (or another mod) tries to join a Ring Racers E game
+		SV_SendRefuse(node, "This is a Ring Racers E game.\nOnly Ring Racers E can join\n(its files and game logic differ).");
 	}
 	else if (netbuffer->u.clientcfg.version != VERSION
 		|| netbuffer->u.clientcfg.subversion != SUBVERSION)
@@ -4668,6 +4692,7 @@ static void HandleConnect(SINT8 node)
 
 		// client authorised to join
 		nodewaiting[node] = (UINT8)(netbuffer->u.clientcfg.localplayers - playerpernode[node]);
+		RRNet_SetNodeLowEnd(node, node ? netbuffer->u.clientcfg.rrlowend : 0); // (the host decides with its own option)
 		if (!nodeingame[node])
 		{
 			gamestate_t backupstate = gamestate;
@@ -4774,6 +4799,10 @@ static void HandleServerInfo(SINT8 node)
 	netbuffer->u.serverinfo.gametypename
 		[sizeof netbuffer->u.serverinfo.gametypename - 1] = '\0';
 	D_SanitizeKeepColors(netbuffer->u.serverinfo.servername, netbuffer->u.serverinfo.servername, MAXSERVERNAME);
+
+	// Connecting by IP to a server that is NOT Ring Racers E -> warn instead of waiting for the timeout
+	if (client && cl_mode == CL_SEARCHING && node == servernode)
+		RRNet_CheckServerInfo(&netbuffer->u.serverinfo);
 
 	// If we have cause to reject it, it's not worth observing.
 	if (
@@ -6812,6 +6841,7 @@ static void SV_Maketic(void)
 	maketic++;
 }
 
+
 boolean TryRunTics(tic_t realtics)
 {
 	boolean ticking;
@@ -7407,6 +7437,8 @@ void NetUpdate(void)
 
 	nowtime = I_GetTime();
 	realtics = nowtime - gametime;
+
+	RRNet_Update(); // game low-end mode (server) and join warnings (client)
 
 	if (!demo.playback && g_fast_forward > 0)
 	{

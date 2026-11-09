@@ -20,6 +20,7 @@
 #include "../../m_cond.h"
 #include "../../s_sound.h"
 #include "../../k_zvote.h"
+#include "../../rr_nete.h" // Ring Racers E
 
 #ifdef HAVE_DISCORDRPC
 #include "../../discord.h"
@@ -322,6 +323,9 @@ boolean M_PauseInputs(INT32 ch)
 		M_SetMenuDelay(pid);
 		return true;
 	}
+	// Ring Racers E: the online host sees their IPs with Y (hint in the bottom left corner, k_menudraw.c M_DrawPause)
+	if (netgame && server && RRNet_MyIPsInput(pid))
+		return true;
 	return false;
 }
 

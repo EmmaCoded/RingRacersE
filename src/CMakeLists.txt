@@ -367,6 +367,9 @@ target_sources(SRB2SDL2 PRIVATE apng.c)
 
 target_compile_definitions(SRB2SDL2 PRIVATE -DUSE_STUN)
 target_sources(SRB2SDL2 PRIVATE stun.cpp)
+
+# Ring Racers E: E-only netgames, synced low-end mode, local IP list (Host Game menu)
+target_sources(SRB2SDL2 PRIVATE rr_nete.c rr_netip.cpp)
 if(SRB2_CONFIG_ENABLE_DISCORDRPC)
 	target_link_libraries(SRB2SDL2 PRIVATE DiscordRPC::DiscordRPC)
 	target_compile_definitions(SRB2SDL2 PRIVATE -DHAVE_DISCORDRPC)

@@ -5140,7 +5140,7 @@ static void Command_Version_f(void)
 #ifdef DEVELOP
 	CONS_Printf("Ring Racers %s %s %s (%s %s)\n", D_GetFancyBranchName(), comprevision, compnote, compdate, comptime);
 #else
-	CONS_Printf("Ring Racers %s (%s %s %s %s) ", VERSIONSTRING, compdate, comptime, comprevision, D_GetFancyBranchName());
+	CONS_Printf("Ring Racers E v2.4E (%s %s %s %s) ", compdate, comptime, comprevision, D_GetFancyBranchName());
 #endif
 
 	// Base library
@@ -6860,7 +6860,7 @@ UINT32 staffsync_ghost = 0;
 UINT32 staffsync_done = 0;
 UINT32 staffsync_total = 0;
 UINT32 staffsync_failed = 0;
-staffsync_t staffsync_results[1024];
+staffsync_t staffsync_results[RR_STAFFSYNC_MAX];
 
 static void Command_Staffsync(void)
 {

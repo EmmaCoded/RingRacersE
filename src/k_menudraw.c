@@ -13,11 +13,13 @@
 
 #ifdef __GNUC__
 #include <unistd.h>
+#include "rr_config.h"
 #endif
 
 #include "k_menu.h"
 
 #include "doomdef.h"
+#include "rr_nete.h" // Ring Racers E: My IP Addresses hint
 #include "d_main.h"
 #include "d_netcmd.h"
 #include "console.h"
@@ -91,6 +93,7 @@ int	snprintf(char *str, size_t n, const char *fmt, ...);
 #ifdef HAVE_DISCORDRPC
 #include "discord.h"
 #endif
+
 
 fixed_t M_TimeFrac(tic_t tics, tic_t duration)
 {
@@ -309,6 +312,7 @@ void M_DrawMenuBackground(void)
 
 	V_DrawFixedPatch(0, (BASEVIDHEIGHT + 16) * FRACUNIT, FRACUNIT, V_SUBTRACT, W_CachePatchName("MENUBG2", PU_CACHE), NULL);
 
+	{
 	V_DrawFixedPatch(8 * FRACUNIT, -bgText1Scroll,
 		FRACUNIT, V_SUBTRACT, text1, NULL);
 	V_DrawFixedPatch(8 * FRACUNIT, -bgText1Scroll + text1loop,
@@ -318,6 +322,7 @@ void M_DrawMenuBackground(void)
 		FRACUNIT, V_ADD, text2, NULL);
 	V_DrawFixedPatch(-bgText2Scroll + text2loop, (BASEVIDHEIGHT-8) * FRACUNIT,
 		FRACUNIT, V_ADD, text2, NULL);
+	}
 
 	if (renderdeltatics > 2*FRACUNIT)
 		return; // wipe hitch...
@@ -4078,6 +4083,7 @@ void M_DrawTimeAttack(void)
 
 void M_DrawMasterServerReminder(void)
 {
+	return; // Ring Racers E: no server list, so the "List via <master server>" strip is not drawn
 	// Did you change the Server Browser address? Have a little reminder.
 
 	INT32 mservflags = 0;
@@ -4865,6 +4871,10 @@ static void M_DrawLinkArrow(INT32 x, INT32 y, INT32 i)
 	);
 }
 
+// Where each line ended up in the last draw (for menus that draw extra things, e.g. Advanced Video)
+INT32 M_OptionItemY[M_OPTIONITEMY_MAX];
+INT32 M_OptionItemX;
+
 void M_DrawGenericOptions(void)
 {
 	INT32 x = currentMenu->x - M_EaseWithTransition(Easing_Linear, 5 * 48), y = currentMenu->y, w, i, cursory = -100;
@@ -4873,6 +4883,10 @@ void M_DrawGenericOptions(void)
 	boolean collapse = false;
 	boolean opening = false;
 	fixed_t boxt = 0;
+
+	M_OptionItemX = x;
+	for (i = 0; i < M_OPTIONITEMY_MAX; i++)
+		M_OptionItemY[i] = M_OPTIONITEMY_NONE;
 
 	M_DrawMenuTooltips();
 	M_DrawOptionsMovingButton();
@@ -4948,6 +4962,9 @@ box_found:
 			boxy = 0;
 			opening = false;
 		}
+
+		if (i < M_OPTIONITEMY_MAX && !opening)
+			M_OptionItemY[i] = y;
 
 		if (i == itemOn && !opening)
 		{
@@ -6525,6 +6542,11 @@ void M_DrawPause(void)
 	{
 		V_DrawMenuString(4, 188 + offset/2, V_YELLOWMAP, M_GetGameplayMode());
 	}
+
+	// Ring Racers E: online host: "<Y> My IP Addresses" in the bottom left corner. Without a round queue the
+	// gameplay mode is at y=188, so the hint goes above it; with a queue the mode moves up (y=167) and the hint goes at the bottom.
+	if (netgame && server)
+		RRNet_DrawMyIPsHint(4, ((gamestate != GS_INTERMISSION && roundqueue.size > 0) ? 190 : 176) + offset/2, false);
 
 	if (drawqueue)
 	{

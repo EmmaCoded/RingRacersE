@@ -592,6 +592,7 @@ void Advertise_OnChange(void)
 
 	if (cv_advertise.value)
 	{
+#ifdef MASTERSERVER // no curl -> no master server
 		if (serverrunning && netgame)
 		{
 			Lock_state();
@@ -605,6 +606,9 @@ void Advertise_OnChange(void)
 				RegisterServer();
 			}
 		}
+#else
+		(void)different;
+#endif
 	}
 	else
 	{
@@ -617,3 +621,11 @@ void Advertise_OnChange(void)
 
 	M_PopupMasterServerRules();
 }
+
+#ifndef MASTERSERVER
+// No curl -> no master server. Empty functions so that it links.
+void RegisterServer(void) {}
+void UnregisterServer(void) {}
+void Get_rules(void) {}
+void MasterClient_Ticker(void) {}
+#endif

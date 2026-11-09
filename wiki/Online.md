@@ -28,9 +28,8 @@ The server browser would show the official game's public list, which E cannot jo
 
 - Opening the server browser shows a message explaining that E plays by **Direct Join** (IP address).
 - The "(Public: ...)" label was removed from Host Game.
-- The **Make Public** option (`advertise`, off by default) is still in Options > Server. In builds with
-  curl, turning it on still lists the game on the official master server; official players who try to join get the
-  "Ring Racers E only" message.
+- The **Make Public** option was removed from Options > Server, and the `advertise` console variable always
+  goes back to `No` (with a message). E games are never listed on the official master server.
 - Builds without curl have no master server at all; empty stand-in functions in `mserv.c` keep them linking.
 
 ## My IP Addresses

@@ -48,7 +48,7 @@ In netgames, the host decides: if the host uses Low-End Mode, every player uses 
 ### Online
 
 - Ring Racers E only plays online with other Ring Racers E players. The official game and Ring Racers E show a clear message instead of trying to connect.
-- There is no server browser: use **Direct Join** with an IP address. (The official "Make Public" option in Options > Server is still there; an E game listed publicly can only be joined by Ring Racers E players.)
+- There is no server browser: use **Direct Join** with an IP address. E games are never listed publicly: the "Make Public" option was removed from Options > Server.
 - **My IP Addresses:** press **Y** in the Online menu, in Host Game or in the host's pause menu (hint in the bottom left corner), or use the console command `rrmyip`: shows the addresses other players can use (LAN, Wi-Fi, ZeroTier, Hamachi, Radmin, Tailscale and other VPNs) with the port. It never shows a public IP of a normal network adapter.
 
 ### Other changes

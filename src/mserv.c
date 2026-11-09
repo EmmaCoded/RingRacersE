@@ -479,7 +479,7 @@ char *GetMasterServerRules(void)
 static boolean
 Online (void)
 {
-	return ( serverrunning && netgame && cv_advertise.value );
+	return false; // Ring Racers E: never listed on the official server browser
 }
 
 static inline void SendPingToMasterServer(void)
@@ -589,6 +589,14 @@ void Advertise_OnChange(void);
 void Advertise_OnChange(void)
 {
 	int different;
+
+	// Ring Racers E: never listed on the official server browser
+	if (cv_advertise.value)
+	{
+		CV_StealthSetValue(&cv_advertise, 0);
+		CONS_Printf("Ring Racers E servers can't be public. Use Direct Join.\n");
+		return;
+	}
 
 	if (cv_advertise.value)
 	{

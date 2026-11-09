@@ -193,6 +193,11 @@ boolean gl_shadersavailable = true;
 // ==========================================================================
 
 
+// Legacy GL changes that change the picture (12288 draw distance, flat sky, no horizon lines,
+// half sprite contrast without shaders) are only used in Low-End Mode. Drawing only (not the
+// simulation), so they also apply in replays and as soon as the option is changed.
+#define RRE_GLLOWEND (rr_lowend || cv_rrlowend.value)
+
 static boolean HWR_UseShader(void)
 {
 	return (cv_glshaders.value && gl_shadersavailable);
@@ -253,7 +258,10 @@ void HWR_ObjectLightLevelPost(gl_vissprite_t *spr, const sector_t *sector, INT32
 				// black with the fallback formula (same issue the rings had).
 				// Measured in Balconies: Sonic facing away from the light = 75.
 				// Half the contrast: 200 -> ~138, shading still visible but not black.
-				*lightlevel += FixedFloor(extralight + (FRACUNIT / 2)) / FRACUNIT;
+				if (RRE_GLLOWEND)
+					*lightlevel += FixedFloor(extralight + (FRACUNIT / 2)) / FRACUNIT;
+				else
+					*lightlevel += FixedFloor((extralight * 2) + (FRACUNIT / 2)) / FRACUNIT;
 			}
 		}
 
@@ -1355,9 +1363,9 @@ static void HWR_RenderPlane(subsector_t *subsector, extrasubsector_t *xsub, bool
 	else DBG_TINT(&Surf, &PolyFlags, 255, 0, 0);
 	HWR_ProcessPolygon(&Surf, planeVerts, nrPlaneVerts, PolyFlags, shader, false);
 
-	// Horizon lines are disabled: they raised the floor up to the
+	// Low-End: horizon lines are disabled: they raised the floor up to the
 	// camera height (a huge plane covering the track).
-	if (false && subsector)
+	if (!RRE_GLLOWEND && subsector)
 	{
 		// Horizon lines
 		FOutVector horizonpts[6];
@@ -3374,7 +3382,7 @@ static boolean HWR_CheckBBox(fixed_t *bspcoord)
 		else if (vx > (bspcoord[BOXRIGHT] >> FRACBITS)) dx = vx - (bspcoord[BOXRIGHT] >> FRACBITS);
 		if (vy < (bspcoord[BOXBOTTOM] >> FRACBITS)) dy = (bspcoord[BOXBOTTOM] >> FRACBITS) - vy;
 		else if (vy > (bspcoord[BOXTOP] >> FRACBITS)) dy = vy - (bspcoord[BOXTOP] >> FRACBITS);
-		if ((INT64)dx * dx + (INT64)dy * dy > (INT64)RRE_WORLDDIST * RRE_WORLDDIST)
+		if (RRE_GLLOWEND && (INT64)dx * dx + (INT64)dy * dy > (INT64)RRE_WORLDDIST * RRE_WORLDDIST)
 			return false;
 	}
 
@@ -7112,8 +7120,8 @@ static void HWR_DrawSkyBackground(player_t *player)
 {
 	HWD.pfnSetBlend(PF_Translucent|PF_NoDepthTest|PF_Modulated);
 
-	// The dome cost 5-34 ms/frame on slow hardware; always a flat sky (1 quad).
-	if (false)
+	// Low-End: the dome cost 5-34 ms/frame on slow hardware; flat sky (1 quad).
+	if (!RRE_GLLOWEND && cv_glskydome.value)
 	{
 		FTransform dometransform;
 		const float fpov = FIXED_TO_FLOAT(R_FOV(viewssnum)+player->fovadd);

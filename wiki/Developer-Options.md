@@ -22,7 +22,7 @@ build changes.
 | `bot_wp_mask` | 3 | Bots search waypoints 1 tic in (mask + 1) in Low-End Mode; 0 = every tic |
 | `bot_effects` | 0 | 1 = bots off screen keep their dust, smoke and speed lines in Low-End Mode |
 | `nostatic` | off | Turns off the [static geometry cache](Static-Geometry-Cache.md) |
-| `dist` | 12288 | Legacy GL draw distance (1024 to 32768), see [Legacy GL changes](Legacy-GL-Changes.md) |
+| `dist` | 12288 | Legacy GL draw distance in Low-End Mode (1024 to 32768), see [Legacy GL changes](Legacy-GL-Changes.md) |
 
 Options are read once (at startup or when a course loads), never per frame.
 

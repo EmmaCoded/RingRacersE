@@ -21,7 +21,8 @@ middle of a course would be unpredictable.
 - It is never used while watching a replay.
 - In netgames everyone uses the server's value: see [Online](Online.md#low-end-mode-in-netgames).
 - With the option off, every Low-End branch is skipped (`if (RR_LOWEND ...)`) and the original code runs.
-  (The Legacy GL renderer has some changes that are always active: see [Legacy GL changes](Legacy-GL-Changes.md).)
+  (The Legacy GL drawing changes are the exception: they only affect drawing, so they follow the option directly,
+  also in replays. See [Legacy GL changes](Legacy-GL-Changes.md).)
 
 All the code is inside `#ifdef RR_LOWEND_CODE` blocks. A few of those blocks are always active but give the exact
 same result as the original, only cheaper (for example, `K_GetKartSpeed` and `K_PlayerTripwireSpeedThreshold` are
@@ -66,7 +67,9 @@ Each change below says why it does not change the race. Numbers are measurements
 
 ### Drawing (Legacy GL)
 
-With OpenGL, Low-End Mode also draws the level geometry from a [static geometry cache](Static-Geometry-Cache.md).
+With OpenGL, Low-End Mode also draws the level geometry from a [static geometry cache](Static-Geometry-Cache.md),
+and uses a shorter draw distance, a flat sky, no horizon lines and softer sprite lighting without shaders:
+see [Legacy GL changes](Legacy-GL-Changes.md#low-end-mode-only-different-picture).
 
 ## Tuning and turning parts off
 

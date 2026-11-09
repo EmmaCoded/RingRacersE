@@ -19,7 +19,7 @@ Graphics:
 Performance:
 - [Low-End Mode](Low-End-Mode.md): every lighter system, and why it is safe.
 - [Static geometry cache](Static-Geometry-Cache.md): how Legacy GL draws the level in Low-End Mode.
-- [Legacy GL changes](Legacy-GL-Changes.md): renderer changes that are always active (sky, draw distance...).
+- [Legacy GL changes](Legacy-GL-Changes.md): renderer changes (some always active, some only in Low-End Mode: sky, draw distance...).
 
 Online and configuration:
 - [Online](Online.md): Ring Racers E only, Direct Join, My IP Addresses, Low-End Mode in netgames.

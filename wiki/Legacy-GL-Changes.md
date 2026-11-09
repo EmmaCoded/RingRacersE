@@ -1,11 +1,11 @@
-# Legacy GL changes (always active)
+# Legacy GL changes
 
 [Home](Home.md) - File: `src/hardware/hw_main.cpp`
 
-These changes to the Legacy GL renderer are active in Ring Racers E **with or without** Low-End Mode.
-Some give exactly the same picture with less work; others change what is drawn.
+Changes to the Legacy GL renderer. The ones that give exactly the same picture with less work are always active.
+The ones that change what is drawn are only used in [Low-End Mode](Low-End-Mode.md).
 
-## Same picture, less work
+## Always active: same picture, less work
 
 | Change | Why |
 |---|---|
@@ -15,7 +15,10 @@ Some give exactly the same picture with less work; others change what is drawn.
 | Sprite roll is done by rotating the quad on the GPU. Rotsprite is only kept for sprites split by lights and for floor sprites. | Rotsprite created a new texture for every angle (about 1000 texture uploads when a race starts, for item boxes). |
 | The screen is copied into a texture (`MakeScreenTexture`, in `HWR_DoPostProcessor`) only when the view has a water or heat effect, and not in splitscreen. The original copied it every frame. | That texture is only read by the water/heat redraw in the same frame (`HWR_DrawIntermissionBG` is never called in Ring Racers). The copy made the CPU wait for the GPU: 1 to 17 ms per frame with ANGLE, and some time on every API. |
 
-## Different picture
+## Low-End Mode only: different picture
+
+These only change drawing, not the simulation, so they follow the option directly: they also apply while watching
+a replay and as soon as the option is changed (`RRE_GLLOWEND`). With Low-End Mode off, the original code runs.
 
 | Change | Why |
 |---|---|
@@ -23,6 +26,11 @@ Some give exactly the same picture with less work; others change what is drawn.
 | **Flat sky:** the sky is always one flat quad; the sky dome is not drawn. | The dome cost 5 to 34 ms per frame on slow hardware. |
 | **No horizon lines:** horizon line specials are not drawn. | They raised the floor up to the camera height, drawing a huge plane over the track. |
 | **Sprite lighting without shaders:** when shaders are off, the light contrast on sprites is halved (for example 200 -> about 138 instead of 75). | With the fallback formula, sprites facing away from the light looked almost black. |
+
+## Always active: fixes
+
+| Change | Why |
+|---|---|
 | **Floor sprites on slopes:** see [Small fixes](Small-Fixes.md#floor-sprites-on-slopes). | They were partly hidden under the floor. |
 
 For the original code, see

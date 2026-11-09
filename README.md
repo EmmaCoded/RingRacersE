@@ -39,7 +39,7 @@ Video > Advanced > **Rendering Backend...** shows a list with every renderer you
 
 Video > Advanced > **Low-End Mode**. Off by default. When it is off, the game runs the original code.
 
-When it is on, the game uses lighter versions of several systems: rings far from players sleep, bot AI and bot waypoints update less often, distant springs, item boxes and decorations think less often, there are fewer particles and effects, and Legacy GL draws the level geometry from a static cache (`src/hardware/rr_staticgeo.cpp`).
+When it is on, the game uses lighter versions of several systems: rings far from players sleep, bot AI and bot waypoints update less often, distant springs, item boxes and decorations think less often, there are fewer particles and effects, and Legacy GL draws the level geometry from a static cache (`src/hardware/rr_staticgeo.cpp`) with a shorter draw distance, a flat sky and no horizon lines.
 
 Low-End Mode is applied when a course loads. It is not used while watching replays.
 

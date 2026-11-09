@@ -19,6 +19,7 @@
 #include <net/if.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include "doomtype.h" // INT32, boolean (on Windows they come from windows.h)
 #endif
 
 #include "rr_nete.h"

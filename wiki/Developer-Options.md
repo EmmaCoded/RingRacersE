@@ -6,7 +6,8 @@ These are for testing and measuring. Players do not need them.
 
 ## Test options file
 
-`rr_config.h` reads optional test options from `devconfig/rr_config.txt` (folder `RRCFG_DIR`), one per line:
+`rr_config.h` reads optional test options from `devconfig/rr_config.txt` (folder `RRCFG_DIR`, inside the game data folder:
+the one with the `.pk3` files, `RINGRACERSWADDIR` if set), one per line:
 
     key = value      # comment
 
@@ -23,6 +24,7 @@ build changes.
 | `bot_effects` | 0 | 1 = bots off screen keep their dust, smoke and speed lines in Low-End Mode |
 | `nostatic` | off | Turns off the [static geometry cache](Static-Geometry-Cache.md) |
 | `dist` | 12288 | Legacy GL draw distance in Low-End Mode (1024 to 32768), see [Legacy GL changes](Legacy-GL-Changes.md) |
+| `diaglog` | off | Writes the periodic diagnostic lines (`[STATIC]`, `[DRAW]`, `[CMAP]`...) to the log; several per second during a race (about 1 MB per hour) |
 
 Options are read once (at startup or when a course loads), never per frame.
 
@@ -34,17 +36,19 @@ Options are read once (at startup or when a course loads), never per frame.
 | `-testwindow` | Small window in the top right corner that does not steal focus; the game does not pause without focus; no audio. For automated tests. |
 | `-rrmenutest N` | Opens Video > Advanced with the cursor on renderer N (menu test without a keyboard) |
 | `-rrswitchtest 9,7,1` | With the menu open, switches the renderer to each value every 6 seconds (live switch stress test) |
+| `-crashtest` | Crashes on purpose at startup (tests the `[CRASH]` log) |
 
 ## Log tags
 
-Diagnostic lines go only to the log file (`RR_DIAGPRINT` = `I_OutputMsg`), never to the in-game console, so they do not
-cover the screen during a race. Main tags:
+Diagnostic lines go only to the log file, never to the in-game console, so they do not
+cover the screen during a race. The periodic ones (`RR_DIAGPRINT`) need `diaglog`. Main tags:
 
 | Tag | Meaning |
 |---|---|
 | `[GFXAPI]` | API detection, Mesa/ANGLE setup, live switches |
 | `[D3D9]` | Direct3D 9 backend |
 | `[LOWEND]` | Low-End Mode on/off when a course loads |
-| `[STATIC]` | Static geometry cache statistics |
+| `[STATIC]` | Static geometry cache statistics (with `diaglog`; "out of memory" warnings always) |
 | `[DIST]` | Legacy GL draw distance in use |
 | `[TERMINATE]` | Uncaught C++ exception before aborting |
+| `[CRASH]` | Crash (severe exception): code, address as module+offset and call stack (Windows) |

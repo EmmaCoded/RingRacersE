@@ -79,9 +79,17 @@ static inline int RRCfg_Int(const char *key, int def)
 	return x;
 }
 
-// [TAG] diagnostic lines go to the log only (I_OutputMsg). With CONS_Printf they would also show
-// up as console text on top of the screen during a race.
-#define RR_DIAGPRINT I_OutputMsg
+// [TAG] diagnostic lines ([STATIC], [DRAW], [CMAP]...; several per second during a race) go to the
+// log only, and only with the "diaglog" option in rr_config.txt (off by default: the log would grow
+// about 1 MB per hour). I_OutputMsg, not CONS_Printf: that would also show them as console text on
+// top of the screen during a race.
+static inline int RRCfg_DiagLog(void)
+{
+	static int on = -1;
+	if (on < 0) on = RRCfg_On("diaglog");
+	return on;
+}
+#define RR_DIAGPRINT(...) do { if (RRCfg_DiagLog()) I_OutputMsg(__VA_ARGS__); } while (0)
 
 // LOW-END MODE: lighter game logic for slow machines (sleeping rings, bot AI every 2 tics, distant
 // objects think less often, fewer particles...). Chosen in Video Options > Advanced (cv_rrlowend) and

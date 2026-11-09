@@ -1038,12 +1038,12 @@ static void RRE_StaticLevelInit(void)
 	catch (const std::bad_alloc &) // out of memory -> no cache (slower, but no crash)
 	{
 		decltype(items)().swap(items); enabled = false;
-		RR_DIAGPRINT("[STATIC] OUT OF MEMORY for the cache (%u items): cache OFF\n", (unsigned)(segBase + numsegs));
+		I_OutputMsg("[STATIC] OUT OF MEMORY for the cache (%u items): cache OFF\n", (unsigned)(segBase + numsegs));
 	}
 	secSig.assign(numsectors, 0);
 	secStamp.assign(numsectors, 0);
 	try { segMemo.assign(numsegs, SegMemo{}); } // ~36 B x segs, linear memory
-	catch (const std::bad_alloc &) { decltype(segMemo)().swap(segMemo); RR_DIAGPRINT("[STATIC] out of memory for segMemo: memo OFF\n"); }
+	catch (const std::bad_alloc &) { decltype(segMemo)().swap(segMemo); I_OutputMsg("[STATIC] out of memory for segMemo: memo OFF\n"); }
 	secSigB.assign(numsectors, 0);
 	secStampB.assign(numsectors, 0);
 	secSigW.assign(numsectors, 0);
@@ -1054,7 +1054,7 @@ static void RRE_StaticLevelInit(void)
 	try {
 	if (polys.capacity() < RRE_MAXPOLYS) { decltype(polys)().swap(polys); polys.reserve(RRE_MAXPOLYS); }
 	if (groups.capacity() < RRE_MAXGROUPS) { decltype(groups)().swap(groups); groups.reserve(RRE_MAXGROUPS); }
-	} catch (const std::bad_alloc &) { enabled = false; RR_DIAGPRINT("[STATIC] OUT OF MEMORY for polys/groups: cache OFF\n"); }
+	} catch (const std::bad_alloc &) { enabled = false; I_OutputMsg("[STATIC] OUT OF MEMORY for polys/groups: cache OFF\n"); }
 	groupMap.reserve(RRE_MAXGROUPS);
 	needReset = true;
 	RR_DIAGPRINT("[STATIC] map: %u subsectors, %u segs, cache %s\n",
@@ -3374,7 +3374,7 @@ static boolean HWR_CheckBBox(fixed_t *bspcoord)
 		{
 			RRE_WORLDDIST = 12288;
 			{ int v = RRCfg_Int("dist", 0); if (v >= 1024 && v <= 32768) RRE_WORLDDIST = v; }
-			RR_DIAGPRINT("[DIST] draw distance = %d\n", (int)RRE_WORLDDIST);
+			I_OutputMsg("[DIST] draw distance = %d\n", (int)RRE_WORLDDIST);
 		}
 		INT32 vx = dup_viewx >> FRACBITS, vy = dup_viewy >> FRACBITS;
 		INT32 dx = 0, dy = 0;

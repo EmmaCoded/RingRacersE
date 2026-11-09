@@ -1009,6 +1009,52 @@ static inline void I_ShutdownConsole(void){}
 //
 // StartupKeyboard
 //
+#ifdef _WIN32
+// [CRASH]: on a crash (severe exception) write the code, the address as module+offset (game exe, Mesa,
+// ANGLE, driver...) and the call stack to the log. Then the previous handlers run as usual.
+// The exe has no debug info: resolve exe offsets with `nm -C --defined-only RingRacersE.exe | sort`
+// (ImageBase 0x140000000, nearest lower symbol).
+static void rr_crash_where(const void *addr, char *out, size_t outsz)
+{
+	HMODULE mod = NULL;
+	char name[MAX_PATH] = "?";
+	if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)addr, &mod) && mod)
+	{
+		GetModuleFileNameA(mod, name, sizeof name);
+		const char *base = strrchr(name, '\\');
+		snprintf(out, outsz, "%s+0x%llx", base ? base + 1 : name, (unsigned long long)((const char *)addr - (const char *)mod));
+	}
+	else
+		snprintf(out, outsz, "%p", addr);
+}
+static LONG WINAPI rr_crash_filter(PEXCEPTION_POINTERS info)
+{
+	// Vectored handler: it sees every exception first (the MinGW CRT catches SIGSEGV before the
+	// unhandled-exception filter). Only severe ones and at most 4 (a driver may catch some on purpose:
+	// the last one in the log is the crash).
+	static volatile LONG count = 0;
+	const DWORD code = (info && info->ExceptionRecord) ? info->ExceptionRecord->ExceptionCode : 0;
+	const bool severe = code == EXCEPTION_ACCESS_VIOLATION || code == EXCEPTION_ILLEGAL_INSTRUCTION
+		|| code == EXCEPTION_INT_DIVIDE_BY_ZERO || code == EXCEPTION_STACK_OVERFLOW || code == EXCEPTION_PRIV_INSTRUCTION;
+	if (severe && InterlockedIncrement(&count) <= 4)
+	{
+		char where[MAX_PATH + 32];
+		rr_crash_where(info->ExceptionRecord->ExceptionAddress, where, sizeof where);
+		I_OutputMsg("[CRASH] exception 0x%08lX at %s (thread %lu)\n", (unsigned long)code, where, (unsigned long)GetCurrentThreadId());
+		if (code == EXCEPTION_ACCESS_VIOLATION && info->ExceptionRecord->NumberParameters >= 2)
+			I_OutputMsg("[CRASH] %s at address %p\n", info->ExceptionRecord->ExceptionInformation[0] ? "write" : "read", (void *)info->ExceptionRecord->ExceptionInformation[1]);
+		void *frames[40];
+		const USHORT n = CaptureStackBackTrace(0, 40, frames, NULL);
+		for (USHORT i = 0; i < n; i++)
+		{
+			rr_crash_where(frames[i], where, sizeof where);
+			I_OutputMsg("[CRASH]   #%u %s\n", (unsigned)i, where);
+		}
+	}
+	return EXCEPTION_CONTINUE_SEARCH;
+}
+#endif
+
 static void I_RegisterSignals (void)
 {
 	g_main_thread_id = std::this_thread::get_id();
@@ -1035,6 +1081,11 @@ static void I_RegisterSignals (void)
 #ifdef USE_DBGHELP
 	// Initialize Windows SDK-specific crashdump handler (DbgHelp)
 	g_previous_toplevelexceptionfilter = SetUnhandledExceptionFilter(WriteMinidumpExceptionFilter);
+#endif
+#ifdef _WIN32
+	AddVectoredExceptionHandler(1, rr_crash_filter); // [CRASH]
+	if (M_CheckParm("-crashtest")) // test for [CRASH]: crash on purpose
+		*(volatile int *)0 = 1;
 #endif
 }
 

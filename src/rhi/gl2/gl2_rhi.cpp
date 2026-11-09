@@ -44,6 +44,16 @@ using namespace rhi;
 #define GL_ASSERT ;
 #endif
 
+// DirectX 11 / Vulkan through ANGLE = this same backend on top of OpenGL ES 3 (ANGLE's EGL context).
+// ES has no AlphaFunc/ALPHA_TEST, ClearDepth (it is ClearDepthf), GL_BACK_LEFT or the LUMINANCE8 formats.
+static bool g_gl2_es = false;
+static void (GLAD_API_PTR *g_gl2_cleardepthf)(GLfloat) = nullptr;
+static void GLAD_API_PTR gl2_es_cleardepth(GLdouble d)
+{
+	if (g_gl2_cleardepthf)
+		g_gl2_cleardepthf(static_cast<GLfloat>(d));
+}
+
 namespace
 {
 
@@ -606,6 +616,22 @@ Gl2Rhi::Gl2Rhi(std::unique_ptr<Gl2Platform>&& platform, GlLoadFunc load_func) : 
 {
 	gl_ = std::make_unique<GladGLContext>();
 	gladLoadGLContext(gl_.get(), load_func);
+	const char* ver = gl_->GetString ? reinterpret_cast<const char*>(gl_->GetString(GL_VERSION)) : nullptr;
+	g_gl2_es = ver && std::string_view(ver).find("OpenGL ES") != std::string_view::npos;
+	if (g_gl2_es)
+	{
+		g_gl2_cleardepthf = reinterpret_cast<void (GLAD_API_PTR *)(GLfloat)>(load_func("glClearDepthf"));
+		gl_->ClearDepth = gl2_es_cleardepth;
+		// glad loads them as the ARB_framebuffer_object extension, which ES does not advertise (they are core in ES 2/3)
+#define GL2_ES_LOAD(f) if (!gl_->f) gl_->f = reinterpret_cast<decltype(gl_->f)>(load_func("gl" #f))
+		GL2_ES_LOAD(BindFramebuffer); GL2_ES_LOAD(BindRenderbuffer); GL2_ES_LOAD(CheckFramebufferStatus);
+		GL2_ES_LOAD(DeleteFramebuffers); GL2_ES_LOAD(DeleteRenderbuffers); GL2_ES_LOAD(FramebufferRenderbuffer);
+		GL2_ES_LOAD(FramebufferTexture2D); GL2_ES_LOAD(GenFramebuffers); GL2_ES_LOAD(GenRenderbuffers);
+		GL2_ES_LOAD(GenerateMipmap); GL2_ES_LOAD(RenderbufferStorage); GL2_ES_LOAD(IsFramebuffer);
+		GL2_ES_LOAD(IsRenderbuffer); GL2_ES_LOAD(GetRenderbufferParameteriv);
+		GL2_ES_LOAD(GetFramebufferAttachmentParameteriv); GL2_ES_LOAD(BlitFramebuffer);
+#undef GL2_ES_LOAD
+	}
 }
 
 Gl2Rhi::~Gl2Rhi() = default;
@@ -615,6 +641,11 @@ rhi::Handle<rhi::Texture> Gl2Rhi::create_texture(const rhi::TextureDesc& desc)
 	GLenum internal_format = map_internal_texture_format(desc.format);
 	SRB2_ASSERT(internal_format != GL_ZERO);
 	GLenum format = GL_RGBA;
+	if (g_gl2_es) // ES: unsized internal format, EQUAL to the data format
+	{
+		internal_format = map_texture_format(desc.format);
+		format = internal_format;
+	}
 
 	GLuint name = 0;
 	gl_->GenTextures(1, &name);
@@ -844,8 +875,8 @@ rhi::Handle<rhi::Program> Gl2Rhi::create_program(const ProgramDesc& desc)
 	srb2::Vector<const char*> frag_sources;
 	ShaderLoadContext vert_ctx;
 	ShaderLoadContext frag_ctx;
-	vert_ctx.set_version("120");
-	frag_ctx.set_version("120");
+	vert_ctx.set_version(g_gl2_es ? "100" : "120"); // GLSL ES 1.00 with ANGLE (the shaders already include BACKEND_GL_ES)
+	frag_ctx.set_version(g_gl2_es ? "100" : "120");
 	for (auto def : desc.defines)
 	{
 		vert_ctx.define(def);
@@ -1435,10 +1466,13 @@ void Gl2Rhi::set_rasterizer_state(const RasterizerStateDesc& desc)
 
 	// We never use fixed func alpha test, but Legacy GL does, so it has to be turned off.
 	// Note that Core profile and GLES 2+ don't have this at all.
-	gl_->Disable(GL_ALPHA_TEST);
-	GL_ASSERT;
-	gl_->AlphaFunc(GL_ALWAYS, 0);
-	GL_ASSERT;
+	if (!g_gl2_es)
+	{
+		gl_->Disable(GL_ALPHA_TEST);
+		GL_ASSERT;
+		gl_->AlphaFunc(GL_ALWAYS, 0);
+		GL_ASSERT;
+	}
 }
 
 void Gl2Rhi::set_viewport(const Rect& rect)
@@ -1511,9 +1545,21 @@ void Gl2Rhi::read_pixels(const Rect& rect, PixelFormat format, tcb::span<std::by
 	SRB2_ASSERT(rect.x + rect.w <= src_dim.w);
 	SRB2_ASSERT(rect.y + rect.h <= src_dim.h);
 
-	GLenum read_buffer = is_back ? GL_BACK_LEFT : GL_COLOR_ATTACHMENT0;
+	GLenum read_buffer = is_back ? (g_gl2_es ? GL_BACK : GL_BACK_LEFT) : GL_COLOR_ATTACHMENT0;
 	gl_->ReadBuffer(read_buffer);
 	GL_ASSERT;
+
+	if (g_gl2_es && layout != GL_RGBA) // ES only guarantees reading RGBA: read like that and convert
+	{
+		srb2::Vector<std::byte> rgba(static_cast<size_t>(rect.w) * rect.h * 4);
+		gl_->ReadPixels(rect.x, rect.y, rect.w, rect.h, GL_RGBA, GL_UNSIGNED_BYTE, rgba.data());
+		GL_ASSERT;
+		for (uint32_t y = 0; y < rect.h; y++)
+			for (uint32_t x = 0; x < rect.w; x++)
+				for (GLint c = 0; c < size; c++)
+					out[y * pack_stride + x * size + c] = rgba[(static_cast<size_t>(y) * rect.w + x) * 4 + c];
+		return;
+	}
 
 	gl_->ReadPixels(rect.x, rect.y, rect.w, rect.h, layout, type, out.data());
 	GL_ASSERT;
@@ -1674,9 +1720,36 @@ void Gl2Rhi::copy_framebuffer_to_texture(
 	SRB2_ASSERT(src_region.x + src_region.w <= src_dim.w);
 	SRB2_ASSERT(src_region.y + src_region.h <= src_dim.h);
 
-	GLenum read_buffer = is_back ? GL_BACK_LEFT : GL_COLOR_ATTACHMENT0;
+	GLenum read_buffer = is_back ? (g_gl2_es ? GL_BACK : GL_BACK_LEFT) : GL_COLOR_ATTACHMENT0;
 	gl_->ReadBuffer(read_buffer);
 	GL_ASSERT;
+
+	// Ring Racers E: on ES (ANGLE) CopyTexSubImage2D fails with "Invalid copy texture format combination" (the source
+	// framebuffer and the unsized RGBA texture are not compatible) and wipes showed garbage. glBlitFramebuffer
+	// converts between formats: copy into the texture through a temporary FBO and restore the previous state.
+	if (g_gl2_es && gl_->BlitFramebuffer)
+	{
+		GLint prev_fb = 0;
+		gl_->GetIntegerv(GL_FRAMEBUFFER_BINDING, &prev_fb);
+		const GLboolean scissor = gl_->IsEnabled(GL_SCISSOR_TEST);
+		GLuint tmp_fb = 0;
+		gl_->GenFramebuffers(1, &tmp_fb);
+		gl_->BindFramebuffer(GL_READ_FRAMEBUFFER, (GLuint)prev_fb);
+		gl_->BindFramebuffer(GL_DRAW_FRAMEBUFFER, tmp_fb);
+		gl_->FramebufferTexture2D(GL_DRAW_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, tex.texture, 0);
+		if (scissor)
+			gl_->Disable(GL_SCISSOR_TEST);
+		gl_->BlitFramebuffer(
+			src_region.x, src_region.y, src_region.x + src_region.w, src_region.y + src_region.h,
+			dst_region.x, dst_region.y, dst_region.x + dst_region.w, dst_region.y + dst_region.h,
+			GL_COLOR_BUFFER_BIT, GL_NEAREST);
+		if (scissor)
+			gl_->Enable(GL_SCISSOR_TEST);
+		gl_->BindFramebuffer(GL_FRAMEBUFFER, (GLuint)prev_fb);
+		gl_->DeleteFramebuffers(1, &tmp_fb);
+		GL_ASSERT;
+		return;
+	}
 
 	gl_->BindTexture(GL_TEXTURE_2D, tex.texture);
 	GL_ASSERT;

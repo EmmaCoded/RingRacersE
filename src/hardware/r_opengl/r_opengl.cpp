@@ -453,12 +453,15 @@ static PFNglBlendEquation pglBlendEquation;
 #define GL_STATIC_DRAW 0x88E4
 #endif
 
+static void RRGLES_Install(void); // r_gles.inl (Legacy GL on top of OpenGL ES / ANGLE)
+extern "C" int rr_gl_es;
+
 boolean SetupGLfunc(void)
 {
 #ifndef STATIC_OPENGL
 #define GETOPENGLFUNC(func, proc) \
 	*(void**)&func = GetGLFunc(#proc); \
-	if (!func) \
+	if (!func && !rr_gl_es) /* with ES these are missing on purpose (r_gles.inl provides them) */ \
 	{ \
 		GL_MSG_Warning("failed to get OpenGL function: %s", #proc); \
 	} \
@@ -528,6 +531,7 @@ boolean SetupGLfunc(void)
 #undef GETOPENGLFUNC
 
 #endif
+	RRGLES_Install();
 	return true;
 }
 
@@ -949,6 +953,8 @@ static struct {
 
 #endif	// GL_SHADERS
 
+#include "r_gles.inl"
+
 void SetupGLFunc4(void)
 {
 	*(void**)&pglActiveTexture = GetGLFunc("glActiveTexture");
@@ -991,6 +997,7 @@ void SetupGLFunc4(void)
 
 	// GLU
 	*(void**)&pgluBuild2DMipmaps = GetGLFunc("gluBuild2DMipmaps");
+	RRGLES_Install();
 }
 
 EXPORT boolean HWRAPI(CompileShaders) (void)
@@ -2519,12 +2526,176 @@ EXPORT void HWRAPI(DrawIndexedTriangles) (FSurfaceInfo *pSurf, FOutVector *pOutV
 	// the DrawPolygon variant of this has some code about polyflags and wrapping here but havent noticed any problems from omitting it?
 }
 
+// Low-End mode: static geometry cache (hw_main.cpp rre_static + rr_staticgeo.cpp).
+// Vertex pool in a VBO (re-uploaded only if it changed) + UINT16 indices per group.
+// Vertex color: rgb = tint/color, alpha = light level (0-255).
+#ifdef GL_SHADERS
+// Same as GLSL_SOFTWARE_FRAGMENT_SHADER, but the light comes from the vertex alpha and the
+// colormap is the default one (no tint, black fade 0x19, fade_start 0, fade_end 31).
+#define GLSL_STATIC_FRAGMENT_SHADER \
+	"uniform sampler2D tex;\n" \
+	"uniform sampler2D brightmap;\n" \
+	"const vec4 fade_color = vec4(0.0, 0.0, 0.0, 25.0 / 255.0);\n" \
+	"const float fade_start = 0.0;\n" \
+	"const float fade_end = 31.0;\n" \
+	GLSL_DOOM_COLORMAP \
+	GLSL_DOOM_LIGHT_EQUATION \
+	"void main(void) {\n" \
+		"vec4 texel = texture2D(tex, gl_TexCoord[0].st);\n" \
+		"vec4 final_color = texel * vec4(gl_Color.rgb, 1.0);\n" \
+		"float final_lighting = floor(gl_Color.a * 255.0 + 0.5);\n" \
+		"float brightmap_mix = floor(texture2D(brightmap, gl_TexCoord[0].st).r);\n" \
+		"final_lighting += (255.0 - final_lighting) * brightmap_mix;\n" \
+		GLSL_SOFTWARE_FADE_EQUATION \
+		"final_color.a = texel.a;\n" \
+		"gl_FragColor = final_color;\n" \
+	"}\0"
+static GLuint st_prog = 0;
+static int st_progState = 0; // 0 untested, 1 ready, -1 failed (drawn without a shader)
+static boolean StaticProgram(void)
+{
+	if (st_progState)
+		return st_progState > 0;
+	st_progState = -1;
+	if (!pglCreateShader || !pglUseProgram || !pglGetUniformLocation)
+		return false;
+	const GLchar *vs = GLSL_DEFAULT_VERTEX_SHADER, *fs = GLSL_STATIC_FRAGMENT_SHADER;
+	GLuint v = pglCreateShader(GL_VERTEX_SHADER), f = pglCreateShader(GL_FRAGMENT_SHADER);
+	GLint ok = 0;
+	if (!v || !f)
+		return false;
+	pglShaderSource(v, 1, &vs, NULL); pglCompileShader(v);
+	pglGetShaderiv(v, GL_COMPILE_STATUS, &ok);
+	if (ok) { pglShaderSource(f, 1, &fs, NULL); pglCompileShader(f); pglGetShaderiv(f, GL_COMPILE_STATUS, &ok); }
+	if (ok)
+	{
+		st_prog = pglCreateProgram();
+		pglAttachShader(st_prog, v); pglAttachShader(st_prog, f);
+		pglLinkProgram(st_prog);
+		pglGetProgramiv(st_prog, GL_LINK_STATUS, &ok);
+	}
+	pglDeleteShader(v); pglDeleteShader(f);
+	if (!ok)
+	{
+		if (st_prog) pglDeleteProgram(st_prog);
+		st_prog = 0;
+		GL_MSG_Error("DrawStaticPool: the static shader did not compile (drawing without a shader)\n");
+		return false;
+	}
+	pglUseProgram(st_prog);
+	const GLint ut = pglGetUniformLocation(st_prog, "tex"), ub = pglGetUniformLocation(st_prog, "brightmap");
+	if (ut != -1) pglUniform1i(ut, 0);
+	if (ub != -1) pglUniform1i(ub, 1);
+	pglUseProgram(0);
+	st_progState = 1;
+	return true;
+}
+#endif
+
+#ifndef BUFFER_OFFSET
+#define BUFFER_OFFSET(i) ((void*)(i))
+#endif
+static GLuint st_vbo = 0; // outside the function so it can be forgotten on a context switch
+static UINT32 st_vboVersion = 0;
+static INT32 st_vboVerts = -1;
+EXPORT void HWRAPI(DrawStaticPool) (const void *verts, INT32 numVerts, UINT32 version, const UINT16 *idx, INT32 numIdx, FBITFIELD PolyFlags, boolean useShader)
+{
+	GLuint &vbo = st_vbo;
+	UINT32 &vboVersion = st_vboVersion;
+	INT32 &vboVerts = st_vboVerts;
+	if (!verts || numVerts <= 0 || !idx || numIdx < 3 || !pglGenBuffers)
+		return;
+	if (!vbo)
+		pglGenBuffers(1, &vbo);
+	pglBindBuffer(GL_ARRAY_BUFFER, vbo);
+	if (vboVersion != version || vboVerts != numVerts)
+	{
+		pglBufferData(GL_ARRAY_BUFFER, numVerts * 24, verts, GL_STATIC_DRAW);
+		vboVersion = version; vboVerts = numVerts;
+	}
+
+	SetBlend(PolyFlags | PF_Modulated); // modulated: texture x vertex color
+	boolean shader = false;
+#ifdef GL_SHADERS
+	shader = useShader && StaticProgram();
+	if (shader)
+		pglUseProgram(st_prog);
+	else if (pglUseProgram)
+		pglUseProgram(0);
+#else
+	(void)useShader;
+#endif
+
+	pglEnableClientState(GL_VERTEX_ARRAY);
+	pglEnableClientState(GL_TEXTURE_COORD_ARRAY);
+	pglEnableClientState(GL_COLOR_ARRAY);
+	pglVertexPointer(3, GL_FLOAT, 24, BUFFER_OFFSET(0));
+	pglTexCoordPointer(2, GL_FLOAT, 24, BUFFER_OFFSET(12));
+	// without a shader the alpha (light) does not reach the color: the light is already baked into rgb
+	pglColorPointer(shader ? 4 : 3, GL_UNSIGNED_BYTE, 24, BUFFER_OFFSET(20));
+	pglBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+	pglDrawElements(GL_TRIANGLES, numIdx, GL_UNSIGNED_SHORT, idx);
+	pglDisableClientState(GL_VERTEX_ARRAY);
+	pglDisableClientState(GL_TEXTURE_COORD_ARRAY);
+	pglDisableClientState(GL_COLOR_ARRAY);
+	pglBindBuffer(GL_ARRAY_BUFFER, 0);
+	pglColor4ubv(white);
+
+#ifdef GL_SHADERS
+	// the normal path sets its own program again on the next polygon
+	if (shader && pglUseProgram)
+		pglUseProgram(0);
+	gl_shaderstate.changed = true;
+#endif
+
+	if (PolyFlags & PF_RemoveYWrap)
+		pglTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+	if (PolyFlags & PF_ForceWrapX)
+		Clamp2D(GL_TEXTURE_WRAP_S);
+	if (PolyFlags & PF_ForceWrapY)
+		Clamp2D(GL_TEXTURE_WRAP_T);
+}
+
 static const boolean gl_ext_arb_vertex_buffer_object = true;
 
 #define NULL_VBO_VERTEX ((gl_skyvertex_t*)NULL)
 #define sky_vbo_x (gl_ext_arb_vertex_buffer_object ? &NULL_VBO_VERTEX->x : &sky->data[0].x)
 #define sky_vbo_u (gl_ext_arb_vertex_buffer_object ? &NULL_VBO_VERTEX->u : &sky->data[0].u)
 #define sky_vbo_r (gl_ext_arb_vertex_buffer_object ? &NULL_VBO_VERTEX->r : &sky->data[0].r)
+
+// Live API switch (OpenGL <-> Mesa <-> ANGLE). Called with the OLD context still current,
+// right before destroying it: textures are released and ALL GL names kept by Legacy GL are forgotten
+// (the new context is a different world: the old numbers are invalid and could clash with new objects).
+void RR_GLContextLost(void)
+{
+	if (pglDeleteTextures)
+		Flush(); // textures: deleted, and every GLMipmap_t ends up with downloaded = 0 (re-uploaded on demand)
+	else
+	{
+		TexCacheTail = TexCacheHead = NULL;
+		tex_downloaded = 0;
+	}
+	NOTEXTURE_NUM = 0;
+	screentexture = startScreenWipe = endScreenWipe = finalScreenTexture = 0;
+	tex_downloaded = 0;
+#ifdef GL_SHADERS
+	for (INT32 i = 0; i < HWR_MAXSHADERS; i++)
+	{
+		gl_shaders[i].program = 0;
+		gl_usershaders[i].program = 0;
+	}
+	gl_shaderstate.current = NULL;
+	gl_shaderstate.type = 0;
+	gl_shaderstate.program = 0;
+	gl_shaderstate.changed = true;
+	st_prog = 0;
+	st_progState = 0;
+#endif
+	st_vbo = 0;
+	st_vboVersion = 0;
+	st_vboVerts = -1;
+	RRGLES_ContextLost();
+}
 
 EXPORT void HWRAPI(RenderSkyDome) (gl_sky_t *sky)
 {

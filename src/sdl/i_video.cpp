@@ -12,8 +12,10 @@
 /// \file
 /// \brief SRB2 graphics stuff for SDL
 
+#include <exception>
 #include <SDL_video.h>
 #include <stdlib.h>
+#include <string>
 #include <errno.h>
 #include <memory>
 
@@ -66,6 +68,7 @@
 #include "../i_system.h"
 #include "../v_video.h"
 #include "../m_argv.h"
+#include "../m_misc.h" // configfile
 #include "../k_menu.h"
 #include "../d_main.h"
 #include "../s_sound.h"
@@ -143,6 +146,32 @@ static SDL_bool      havefocus = SDL_TRUE;
 static const char *fallback_resolution_name = "Fallback";
 
 static std::unique_ptr<rhi::Rhi> g_rhi;
+
+#if defined(_WIN32)
+// Direct3D 9 / 9Ex RHI backend instead of OpenGL. Requested with -d3d9 (or gfxapi); falls back to OpenGL if it fails.
+#include "../rhi/d3d9/d3d9_factory.hpp"
+#include "../hardware/rr_gfxapi.h"
+#define RR_D3D9 1
+static bool g_d3d9 = false;
+static bool g_d3d9_failed = false;
+static bool g_d3d9_active = false;
+static bool g_d3d9_ex = true;
+static int g_api_override = -1;  // live API switch: 0 OpenGL, 1 DX9, 2 DX9Ex (-1 = whatever the config says)
+static int g_api_swap = -1;      // pending switch (done in VID_CheckRenderer)
+static int g_api_swap_renderer = 1;
+static bool g_gl_hw_used = false; // Legacy GL (HWD) was initialized in this GL context
+static bool g_gl_reset_pending = false; // Legacy GL lost its context: recompile its shaders when coming back
+static bool g_keep_winpos = false;       // the new window (live API switch) appears where the old one was
+static int g_keep_winx = 0, g_keep_winy = 0;
+// When going from OpenGL to D3D9 the GL window is NOT destroyed: it is hidden with its context and RHI, so Legacy GL
+// state (shaders, models, textures) stays valid when coming back. So OpenGL <-> D3D9 is always live.
+static SDL_Window* g_gl_saved_window = NULL;
+static SDL_GLContext g_gl_saved_ctx = NULL;
+static std::unique_ptr<rhi::Rhi> g_gl_saved_rhi;
+static int g_gl_saved_glstate = 0;
+static void RR_DropSavedGl(void);
+static void RR_LiveSwitchNow(void);
+#endif
 static uint32_t g_rhi_generation = 0;
 
 // windowed video modes from which to choose from.
@@ -183,12 +212,64 @@ static void ValidateDisplay(void)
 	}
 }
 
+// "-testwindow" mode (automated testing): small window at the top right corner that does not
+// steal focus, and the game does not pause when it loses focus. Also disables audio.
+static int rr_testwindow = -1;
+static SDL_bool RR_TestWindow(void)
+{
+	if (rr_testwindow < 0)
+		rr_testwindow = M_CheckParm("-testwindow") ? 1 : 0;
+	return rr_testwindow ? SDL_TRUE : SDL_FALSE;
+}
+
+static void RR_TestWindowPos(int w, int *x, int *y)
+{
+	SDL_Rect r;
+	if (SDL_GetDisplayUsableBounds(0, &r) != 0)
+	{
+		r.x = 0; r.y = 0; r.w = 1280;
+	}
+	*x = r.x + r.w - w - 10;
+	*y = r.y + 40; // keep the title bar visible
+}
+
 static void CenterWindow(void)
 {
+	if (RR_TestWindow())
+	{
+		int x, y, w, h;
+		SDL_GetWindowSize(window, &w, &h);
+		RR_TestWindowPos(w, &x, &y);
+		SDL_SetWindowPosition(window, x, y);
+		return;
+	}
 	SDL_SetWindowPosition(window,
 		SDL_WINDOWPOS_CENTERED_DISPLAY(cv_display.value),
 		SDL_WINDOWPOS_CENTERED_DISPLAY(cv_display.value)
 	);
+}
+
+// Ring Racers E: "Borderless Window" (cv_rrborderless). In windowed mode: no borders, at the corner of the
+// window's display and screen sized (the game is scaled to the window). Off: regular window with borders.
+// Not used in test mode.
+static void RR_ApplyWindowBorder(SDL_bool fullscreen)
+{
+	if (!window || fullscreen)
+		return;
+	const SDL_bool borderless = (cv_rrborderless.value && !RR_TestWindow()) ? SDL_TRUE : SDL_FALSE;
+	SDL_SetWindowBordered(window, borderless ? SDL_FALSE : SDL_TRUE);
+	if (borderless)
+	{
+		SDL_Rect r;
+		int d = SDL_GetWindowDisplayIndex(window);
+		if (d < 0)
+			d = 0;
+		if (SDL_GetDisplayBounds(d, &r) == 0)
+		{
+			SDL_SetWindowPosition(window, r.x, r.y);
+			SDL_SetWindowSize(window, r.w, r.h);
+		}
+	}
 }
 
 static void SDLSetMode(int width, int height, SDL_bool fullscreen, SDL_bool reposition)
@@ -240,6 +321,8 @@ static void SDLSetMode(int width, int height, SDL_bool fullscreen, SDL_bool repo
 		}
 	}
 
+	RR_ApplyWindowBorder(fullscreen);
+
 #ifdef HWRENDER
 	if (rendermode == render_opengl)
 	{
@@ -248,6 +331,11 @@ static void SDLSetMode(int width, int height, SDL_bool fullscreen, SDL_bool repo
 	else
 #endif
 	{
+#ifdef RR_D3D9
+		if (g_d3d9_active)
+			rhi::d3d9_set_vsync(g_rhi.get(), cv_vidwait.value > 0);
+		else
+#endif
 		SDL_GL_SetSwapInterval(cv_vidwait.value ? 1 : 0);
 	}
 
@@ -470,34 +558,71 @@ static INT32 SDLJoyAxis(const Sint16 axis, UINT8 pid)
 	return raxis;
 }
 
+// Focus handling. The game only cares about one thing: does the game window have keyboard focus?
+// Losing it pauses (single player), mutes and releases held keys; getting it back undoes that.
+static void Impl_OnFocusGained(void)
+{
+	window_notinfocus = false;
+
+	S_SetMusicVolume();
+	g_voice_disabled = cv_voice_selfdeafen.value;
+}
+
+static void Impl_OnFocusLost(void)
+{
+	if (RR_TestWindow()) // test mode (-testwindow) keeps running in the background
+		return;
+
+	window_notinfocus = true;
+	if (!(cv_bgaudio.value & 1))
+		I_SetMusicVolume(0);
+	if (!(cv_bgaudio.value & 2))
+		S_StopSounds();
+	if (!(cv_bgaudio.value & 4))
+		g_voice_disabled = true;
+
+	G_ResetAllDeviceGameKeyDown();
+	G_ResetAllDeviceResponding();
+}
+
+// Polled once per frame. Window events alone are not reliable here: a live graphics API switch
+// hides one window and creates another, and with ANGLE/Mesa/Direct3D the focus events of the
+// old (hidden) window can arrive after the new one is shown. Reading the current window's real
+// focus flag works the same on every API. Only transitions are applied, so a game that starts
+// without focus (e.g. launched from a script) keeps running until it gains and loses focus.
+static void Impl_PollFocus(void)
+{
+	static int lastfocus = -1;
+	if (window == NULL)
+		return;
+	const int focused = (SDL_GetWindowFlags(window) & SDL_WINDOW_INPUT_FOCUS) ? 1 : 0;
+	if (focused == lastfocus)
+		return;
+	if (lastfocus != -1)
+	{
+		I_OutputMsg("[FOCUS] %s\n", focused ? "gained" : "lost");
+		if (focused)
+			Impl_OnFocusGained();
+		else
+			Impl_OnFocusLost();
+	}
+	lastfocus = focused;
+}
+
 static void Impl_HandleWindowEvent(SDL_WindowEvent evt)
 {
-#define FOCUSUNION static_cast<unsigned int>(mousefocus | (kbfocus << 1))
-	static SDL_bool firsttimeonmouse = SDL_TRUE;
-	static SDL_bool mousefocus = SDL_TRUE;
-	static SDL_bool kbfocus = SDL_TRUE;
-
-	const unsigned int oldfocus = FOCUSUNION;
+	// Ignore events from any window that is not the current game window (e.g. the OpenGL window
+	// kept hidden while Direct3D 9 is active). Focus itself is handled by Impl_PollFocus.
+	if (window != NULL && evt.windowID != SDL_GetWindowID(window))
+		return;
 
 	switch (evt.event)
 	{
-		case SDL_WINDOWEVENT_ENTER:
-			mousefocus = SDL_TRUE;
-			break;
-		case SDL_WINDOWEVENT_LEAVE:
-			mousefocus = SDL_FALSE;
-			break;
 		case SDL_WINDOWEVENT_FOCUS_GAINED:
-			kbfocus = SDL_TRUE;
-			mousefocus = SDL_TRUE;
 			SDL_ShowCursor(SDL_FALSE);
 			break;
 		case SDL_WINDOWEVENT_FOCUS_LOST:
-			kbfocus = SDL_FALSE;
-			mousefocus = SDL_FALSE;
 			SDL_ShowCursor(SDL_TRUE);
-			break;
-		case SDL_WINDOWEVENT_MAXIMIZED:
 			break;
 		case SDL_WINDOWEVENT_MOVED:
 			window_x = evt.data1;
@@ -507,44 +632,12 @@ static void Impl_HandleWindowEvent(SDL_WindowEvent evt)
 			vid.realwidth = evt.data1;
 			vid.realheight = evt.data2;
 			break;
+#if SDL_VERSION_ATLEAST(2, 0, 18) // SDL 2.0.14 (Debian 11) lacks this event
 		case SDL_WINDOWEVENT_DISPLAY_CHANGED:
 			CV_SetValue(&cv_display, evt.data1);
 			break;
+#endif
 	}
-
-	if (FOCUSUNION == oldfocus) // No state change
-	{
-		return;
-	}
-
-	if (mousefocus && kbfocus)
-	{
-		// Tell game we got focus back, resume music if necessary
-		window_notinfocus = false;
-
-		S_SetMusicVolume();
-		g_voice_disabled = cv_voice_selfdeafen.value;
-
-		if (!firsttimeonmouse)
-		{
-			if (cv_usemouse.value) I_StartupMouse();
-		}
-	}
-	else if (!mousefocus && !kbfocus)
-	{
-		// Tell game we lost focus, pause music
-		window_notinfocus = true;
-		if (!(cv_bgaudio.value & 1))
-			I_SetMusicVolume(0);
-		if (!(cv_bgaudio.value & 2))
-			S_StopSounds();
-		if (!(cv_bgaudio.value & 4))
-			g_voice_disabled = true;
-
-		G_ResetAllDeviceGameKeyDown();
-		G_ResetAllDeviceResponding();
-	}
-#undef FOCUSUNION
 }
 
 static void Impl_HandleKeyboardEvent(SDL_KeyboardEvent evt, Uint32 type)
@@ -1031,6 +1124,8 @@ void I_GetEvent(void)
 		}
 	}
 
+	Impl_PollFocus();
+
 	// Send all relative mouse movement as one single mouse event.
 	if (mousemovex || mousemovey)
 	{
@@ -1319,14 +1414,337 @@ static void init_imgui()
 	ImGui::StyleColorsDark();
 }
 
+#ifdef HWRENDER
+// HWD table with the OpenGL functions (r_opengl.cpp).
+static void rr_fill_hwd_gl(void)
+{
+	*(void**)&HWD.pfnInit             = hwSym("Init",NULL);
+	*(void**)&HWD.pfnFinishUpdate     = NULL;
+	*(void**)&HWD.pfnDraw2DLine       = hwSym("Draw2DLine",NULL);
+	*(void**)&HWD.pfnDrawPolygon      = hwSym("DrawPolygon",NULL);
+	*(void**)&HWD.pfnDrawIndexedTriangles = hwSym("DrawIndexedTriangles",NULL);
+	*(void**)&HWD.pfnRenderSkyDome    = hwSym("RenderSkyDome",NULL);
+	*(void**)&HWD.pfnSetBlend         = hwSym("SetBlend",NULL);
+	*(void**)&HWD.pfnClearBuffer      = hwSym("ClearBuffer",NULL);
+	*(void**)&HWD.pfnSetTexture       = hwSym("SetTexture",NULL);
+	*(void**)&HWD.pfnUpdateTexture    = hwSym("UpdateTexture",NULL);
+	*(void**)&HWD.pfnDeleteTexture    = hwSym("DeleteTexture",NULL);
+	*(void**)&HWD.pfnReadRect         = hwSym("ReadRect",NULL);
+	*(void**)&HWD.pfnGClipRect        = hwSym("GClipRect",NULL);
+	*(void**)&HWD.pfnClearMipMapCache = hwSym("ClearMipMapCache",NULL);
+	*(void**)&HWD.pfnSetSpecialState  = hwSym("SetSpecialState",NULL);
+	*(void**)&HWD.pfnSetPalette       = hwSym("SetPalette",NULL);
+	*(void**)&HWD.pfnGetTextureUsed   = hwSym("GetTextureUsed",NULL);
+	*(void**)&HWD.pfnDrawModel        = hwSym("DrawModel",NULL);
+	*(void**)&HWD.pfnCreateModelVBOs  = hwSym("CreateModelVBOs",NULL);
+	*(void**)&HWD.pfnSetTransform     = hwSym("SetTransform",NULL);
+	*(void**)&HWD.pfnPostImgRedraw    = hwSym("PostImgRedraw",NULL);
+	*(void**)&HWD.pfnFlushScreenTextures=hwSym("FlushScreenTextures",NULL);
+	*(void**)&HWD.pfnStartScreenWipe  = hwSym("StartScreenWipe",NULL);
+	*(void**)&HWD.pfnEndScreenWipe    = hwSym("EndScreenWipe",NULL);
+	*(void**)&HWD.pfnDoScreenWipe     = hwSym("DoScreenWipe",NULL);
+	*(void**)&HWD.pfnDrawIntermissionBG=hwSym("DrawIntermissionBG",NULL);
+	*(void**)&HWD.pfnMakeScreenTexture= hwSym("MakeScreenTexture",NULL);
+	*(void**)&HWD.pfnMakeScreenFinalTexture=hwSym("MakeScreenFinalTexture",NULL);
+	*(void**)&HWD.pfnDrawScreenFinalTexture=hwSym("DrawScreenFinalTexture",NULL);
+
+	*(void**)&HWD.pfnCompileShaders   = hwSym("CompileShaders",NULL);
+	*(void**)&HWD.pfnCleanShaders     = hwSym("CleanShaders",NULL);
+	*(void**)&HWD.pfnSetShader        = hwSym("SetShader",NULL);
+	*(void**)&HWD.pfnUnSetShader      = hwSym("UnSetShader",NULL);
+
+	*(void**)&HWD.pfnSetShaderInfo    = hwSym("SetShaderInfo",NULL);
+	*(void**)&HWD.pfnLoadCustomShader = hwSym("LoadCustomShader",NULL);
+	*(void**)&HWD.pfnResetRenderState = hwSym("ResetRenderState",NULL);
+	*(void**)&HWD.pfnDrawStaticPool   = hwSym("DrawStaticPool",NULL);
+}
+#endif
+
+#ifdef RR_D3D9
+// Reads the saved graphics API (cvar gfxapi) from the config file: 0 = OpenGL, 1 = DX9, 2 = DX9Ex.
+static int rr_config_gfxapi(void)
+{
+	FILE* f = fopen(configfile, "r");
+	if (!f)
+		return -1;
+	char line[256];
+	int api = -1; // -1 = the config does not say
+	while (fgets(line, sizeof line, f))
+	{
+		if (strncmp(line, "gfxapi ", 7) != 0)
+			continue;
+		if (strstr(line, "Vulkan"))
+			api = 3; // Vulkan (ANGLE)
+		else if (strstr(line, "DirectX 11") || strstr(line, "DirectX_11") || strstr(line, "D3D11"))
+			api = 5; // OpenGL ES through ANGLE (Direct3D 11)
+		else if (strstr(line, "DirectX 12") || strstr(line, "DirectX_12") || strstr(line, "D3D12"))
+			api = 4; // OpenGL through Mesa GLOn12
+		else if (strstr(line, "Direct3DEx") || strstr(line, "3DEx_9") || strstr(line, "D3D9Ex") || strstr(line, "DirectX 9Ex"))
+			api = 2;
+		else if (strstr(line, "Direct3D") || strstr(line, "3D_9") || strstr(line, "D3D9") || strstr(line, "DirectX 9"))
+			api = 1;
+		else
+			api = 0; // OpenGL (or an API without a backend yet)
+		break;
+	}
+	fclose(f);
+	return api;
+}
+
+static boolean WINAPI rr_d3d9_nohw(void) // WINAPI: on 32-bit the Init type is stdcall (no difference on 64-bit)
+{
+	return false;
+}
+
+// true if Direct3D 9 must be used (-d3d9 or gfxapi in the config). *ex = allow 9Ex.
+static bool rr_d3d9_requested(bool* ex)
+{
+	if (ex)
+		*ex = true;
+	if (g_d3d9_failed)
+		return false;
+	if (g_api_override >= 0) // the API was already switched live in this session
+	{
+		if (ex)
+			*ex = (g_api_override == 2);
+		return g_api_override > 0;
+	}
+	// Whatever is saved in the config wins; -d3d9 only counts if the config has no gfxapi yet
+	const int api = rr_config_gfxapi();
+	if (api == 0 || api >= 3) // OpenGL, Vulkan, DX11 or DX12 (all of them OpenGL-based)
+		return false;
+	if (api > 0)
+	{
+		if (ex)
+			*ex = (api == 2);
+		return true;
+	}
+	return M_CheckParm("-d3d9") != 0;
+}
+
+// DirectX 12 = the game's OpenGL translated by Mesa GLOn12 (mesa\ folder next to the exe).
+// DirectX 11 and Vulkan = OpenGL ES 3 through ANGLE (angle\ folder next to the exe); Legacy GL goes through hardware/r_opengl/r_gles.inl.
+// Live switching between plain OpenGL, Mesa and ANGLE: the GL window is destroyed, the DLL is released
+// (Windows allows the system opengl32 and Mesa's to be loaded at the same time; Mesa itself stays loaded, see rr_gfxapi.cpp) and the other one is loaded.
+static int g_mesa_api = -1; // "translated" API of the GL window (RRGFX_VULKAN / DX12 / DX11); -1 = plain OpenGL
+extern "C" int rr_gl_es;
+
+// Gets SDL ready to create the next GL window with that implementation. api = RRGFX_VULKAN, RRGFX_DX12,
+// RRGFX_DX11 or -1 (plain OpenGL). Call with NO live GL windows. false = failed (plain OpenGL stays).
+static bool rr_apply_impl(int api)
+{
+	g_mesa_api = -1;
+	rr_gl_es = 0;
+	SDL_SetHint(SDL_HINT_OPENGL_ES_DRIVER, "0");
+#ifdef SDL_HINT_VIDEO_FORCE_EGL
+	SDL_SetHint(SDL_HINT_VIDEO_FORCE_EGL, "0");
+#endif
+	SDL_GL_ResetAttributes(); // desktop profile: SDL goes back to WGL
+	if (api < 0 || api == RRGFX_OPENGL)
+		return true;
+	if (RRGfx_IsMesa(api))
+	{
+		if (!RRGfx_Detected(api) || !RRGfx_MesaAvailable())
+		{
+			CONS_Printf("[GFXAPI] %s requested but %s: using plain OpenGL\n", RRGfx_Name(api),
+				RRGfx_MesaAvailable() ? "this PC does not support it" : "the mesa folder is missing (opengl32.dll + libgallium_wgl.dll)");
+			return false;
+		}
+		const char* gl = RRGfx_MesaPrepare(api);
+		// Loaded BEFORE creating the window (SDL uses it)
+		if (gl == NULL || SDL_GL_LoadLibrary(gl) != 0)
+		{
+			CONS_Printf("[GFXAPI] could not load Mesa's OpenGL: %s. Using plain OpenGL\n", SDL_GetError());
+			RRGfx_MesaRelease();
+			return false;
+		}
+		RRGfx_MesaHookSDL(gl);
+		g_mesa_api = api;
+		return true;
+	}
+	if (RRGfx_IsAngle(api))
+	{
+		if (!RRGfx_Detected(api) || !RRGfx_Implemented(api))
+		{
+			CONS_Printf("[GFXAPI] %s requested but %s: using plain OpenGL\n", RRGfx_Name(api),
+				RRGfx_Implemented(api) ? "this PC does not support it" : "the angle folder is missing (libEGL.dll + libGLESv2.dll + vulkan-1.dll)");
+			return false;
+		}
+		if (!RRGfx_AnglePrepare(api))
+			return false;
+		// SDL2: ES profile + ES driver = uses EGL (ANGLE) instead of WGL. Must be set BEFORE creating the window.
+		SDL_SetHint(SDL_HINT_OPENGL_ES_DRIVER, "1");
+#ifdef SDL_HINT_VIDEO_FORCE_EGL
+		SDL_SetHint(SDL_HINT_VIDEO_FORCE_EGL, "1");
+#endif
+		SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+		SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+		SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+		g_mesa_api = api; // DX11 or Vulkan
+		return true;
+	}
+	return false;
+}
+
+// Releases the current implementation (with ALL GL windows already destroyed): SDL unloads its OpenGL DLL
+// and the Mesa / ANGLE setup is undone.
+static void rr_release_impl(void)
+{
+	for (int i = 0; i < 64; i++) // SDL counts loads (windows, LoadGL...): go down to 0
+		SDL_GL_UnloadLibrary();
+	if (RRGfx_IsMesa(g_mesa_api))
+		RRGfx_MesaRelease();
+	else if (RRGfx_IsAngle(g_mesa_api))
+		RRGfx_AngleRelease();
+	SetDllDirectoryA(NULL);
+	g_mesa_api = -1;
+	rr_gl_es = 0;
+}
+
+static void rr_prepare_mesa(void)
+{
+	static bool done = false;
+	if (done)
+		return;
+	done = true;
+	const int c = rr_config_gfxapi();
+	const int api = c == 4 ? RRGFX_DX12 : -1; // Vulkan (3) is not Mesa: rr_prepare_angle handles it
+	if (api >= 0)
+		rr_apply_impl(api);
+}
+
+static void rr_prepare_angle(void)
+{
+	static bool done = false;
+	if (done)
+		return;
+	done = true;
+	const int c = rr_config_gfxapi();
+	if ((c != 5 && c != 3) || g_api_override >= 0)
+		return;
+	rr_apply_impl(c == 3 ? RRGFX_VULKAN : RRGFX_DX11); // Vulkan = ANGLE with its Vulkan backend
+}
+
+// Mesa/ANGLE could not create the context: the config goes back to OpenGL and the game restarts itself
+static void rr_mesa_failed(void)
+{
+	CONS_Printf("[GFXAPI] %s (%s) failed on this PC: %s. Switching back to OpenGL and restarting\n", RRGfx_Name(g_mesa_api),
+		RRGfx_IsAngle(g_mesa_api) ? "ANGLE" : "Mesa", SDL_GetError());
+	FILE* f = fopen(configfile, "rb");
+	std::string out;
+	if (f)
+	{
+		char line[1024];
+		while (fgets(line, sizeof line, f))
+			out += (strncmp(line, "gfxapi ", 7) == 0) ? "gfxapi \"OpenGL\"\n" : line;
+		fclose(f);
+		f = fopen(configfile, "wb");
+		if (f)
+		{
+			fwrite(out.data(), 1, out.size(), f);
+			fclose(f);
+		}
+	}
+	RRGfx_SpawnSelf();
+	SDL_Quit();
+	exit(0);
+}
+
+static SDL_bool Impl_CreateD3d9(void)
+{
+	SDL_SysWMinfo info;
+	SDL_VERSION(&info.version);
+	if (!SDL_GetWindowWMInfo(window, &info) || info.subsystem != SDL_SYSWM_WINDOWS)
+	{
+		CONS_Printf("[D3D9] could not get the Windows window from SDL\n");
+		return SDL_FALSE;
+	}
+	try
+	{
+		std::unique_ptr<rhi::Rhi> d3d9 = rhi::create_d3d9_rhi(info.info.win.window, cv_vidwait.value > 0, g_d3d9_ex);
+		init_imgui();
+		g_rhi = std::move(d3d9);
+		g_rhi_generation += 1;
+	}
+	catch (const std::exception& e)
+	{
+		CONS_Printf("[D3D9] could not start: %s\n", e.what());
+		return SDL_FALSE;
+	}
+	g_d3d9_active = true;
+	RRGfx_SetActive(rhi::d3d9_current_is_ex() ? RRGFX_DX9EX : RRGFX_DX9);
+	vid.glstate = VID_GL_LIBRARY_ERROR; // with Direct3D 9 only the Software renderer exists (GPU 3D / Legacy GL is not ported)
+	return SDL_TRUE;
+}
+#endif
+
 static SDL_bool Impl_CreateContext(void)
 {
 	if (!sdlglcontext)
 	{
-		SDL_GL_ResetAttributes();
-		SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 2);
-		SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 1);
-		sdlglcontext = SDL_GL_CreateContext(window);
+		// Try OpenGL versions from highest to lowest and keep the
+		// first one the PC accepts. Always a COMPATIBILITY profile: Legacy GL uses
+		// old functions (glVertexPointer, fixed matrices) that the core profile lacks.
+		static const int glversions[][2] = {
+			{4,6},{4,5},{4,4},{4,3},{4,2},{4,1},{4,0},
+			{3,3},{3,2},{3,1},{3,0},{2,1},{2,0}
+		};
+#ifdef RR_D3D9
+		if (RRGfx_IsAngle(g_mesa_api)) // ANGLE = OpenGL ES 3.0 (or 2.0), DX11 or Vulkan
+		{
+			for (int es = 3; es >= 2 && !sdlglcontext; es--)
+			{
+				SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
+				SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, es);
+				SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 0);
+				sdlglcontext = SDL_GL_CreateContext(window);
+				if (sdlglcontext)
+				{
+					CONS_Printf("[GFXAPI] OpenGL ES %d.0 (ANGLE) accepted\n", es);
+					rr_gl_es = 1;
+				}
+			}
+			RRGfx_VkHideUserSettings(0); // the Vulkan instance exists now (or failed)
+		}
+		else
+#endif
+		for (size_t gv = 0; gv < sizeof(glversions)/sizeof(glversions[0]) && !sdlglcontext; gv++)
+		{
+			SDL_GL_ResetAttributes();
+			SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, glversions[gv][0]);
+			SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, glversions[gv][1]);
+			if (glversions[gv][0] * 10 + glversions[gv][1] >= 32)
+				SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_COMPATIBILITY);
+			sdlglcontext = SDL_GL_CreateContext(window);
+			if (sdlglcontext)
+				CONS_Printf("[GFXAPI] OpenGL %d.%d (compatibility) accepted\n", glversions[gv][0], glversions[gv][1]);
+		}
+#ifdef RR_D3D9
+		if (!sdlglcontext && !RRGfx_IsAngle(g_mesa_api))
+#else
+		if (!sdlglcontext)
+#endif
+		{
+			// Last attempt: no version requested (whatever the driver gives)
+			SDL_GL_ResetAttributes();
+			sdlglcontext = SDL_GL_CreateContext(window);
+			if (sdlglcontext)
+				CONS_Printf("[GFXAPI] OpenGL with no requested version accepted\n");
+		}
+#ifdef RR_D3D9
+		if (sdlglcontext == NULL && g_mesa_api >= 0)
+			rr_mesa_failed();
+		if (sdlglcontext != NULL)
+		{
+			typedef const unsigned char* (APIENTRY *gs_t)(unsigned int);
+			gs_t gs = (gs_t)SDL_GL_GetProcAddress("glGetString");
+			if (gs)
+				CONS_Printf("[GFXAPI] OpenGL context: %s | %s | %s\n", (const char*)gs(0x1F00), (const char*)gs(0x1F01), (const char*)gs(0x1F02)); // VENDOR, RENDERER, VERSION
+			RRGfx_SetActive(g_mesa_api >= 0 ? g_mesa_api : RRGFX_OPENGL);
+			extern boolean rr_gl_floatmodels; // hw_model.cpp: with Mesa/ANGLE, .md3 models use floats
+			rr_gl_floatmodels = (g_mesa_api >= 0);
+		}
+#endif
 	}
 	if (sdlglcontext == NULL)
 	{
@@ -1366,6 +1784,11 @@ boolean VID_CheckRenderer(void)
 	if (dedicated)
 		return false;
 
+#ifdef RR_D3D9
+	if (g_api_swap >= 0)
+		RR_LiveSwitchNow();
+#endif
+
 	if (setrenderneeded)
 	{
 		rendermode = static_cast<rendermode_t>(setrenderneeded);
@@ -1401,6 +1824,14 @@ boolean VID_CheckRenderer(void)
 	{
 		HWR_Switch();
 		V_SetPalette(0);
+#ifdef RR_D3D9
+		if (g_gl_reset_pending) // Legacy GL in a new context (live API switch)
+		{
+			g_gl_reset_pending = false;
+			HWR_CompileShaders();
+			CONS_Printf("[GFXAPI] Legacy GL rebuilt in the new context (shaders recompiled)\n");
+		}
+#endif
 	}
 #endif
 
@@ -1471,23 +1902,281 @@ static SDL_bool Impl_CreateWindow(SDL_bool fullscreen)
 	if (borderlesswindow)
 		flags |= SDL_WINDOW_BORDERLESS;
 
-	// RHI: always create window as OPENGL
+#ifdef RR_D3D9
+	g_d3d9 = rr_d3d9_requested(&g_d3d9_ex);
+	if (!g_d3d9)
+	{
+		rr_prepare_mesa(); // DX12 through Mesa (only the first window of the process)
+		rr_prepare_angle(); // DirectX 11 / Vulkan through ANGLE
+	}
+#endif
+	// RHI: window as OPENGL (except with the Direct3D 9 backend)
+#ifdef RR_D3D9
+	if (!g_d3d9)
+#endif
 	flags |= SDL_WINDOW_OPENGL;
 
 	// Create a window
-	window = SDL_CreateWindow("Dr. Robotnik's Ring Racers " VERSIONSTRING, SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+	int winx = SDL_WINDOWPOS_CENTERED, winy = SDL_WINDOWPOS_CENTERED;
+#ifdef RR_D3D9
+	if (g_keep_winpos)
+	{
+		g_keep_winpos = false;
+		if (!fullscreen)
+		{
+			winx = g_keep_winx;
+			winy = g_keep_winy;
+		}
+	}
+	else
+#endif
+	if (RR_TestWindow())
+	{
+		RR_TestWindowPos(realwidth, &winx, &winy);
+#ifdef SDL_HINT_WINDOW_NO_ACTIVATION_WHEN_SHOWN // older SDL builds (Linux) lack it
+		SDL_SetHint(SDL_HINT_WINDOW_NO_ACTIVATION_WHEN_SHOWN, "1"); // do not steal keyboard focus
+#endif
+	}
+	window = SDL_CreateWindow("Ring Racers E v2.4E", winx, winy,
 			realwidth, realheight, flags);
 
 	if (window == NULL)
 	{
 		CONS_Printf(M_GetText("Couldn't create window: %s\n"), SDL_GetError());
+#ifdef RR_D3D9
+		if (g_mesa_api >= 0)
+			rr_mesa_failed(); // Mesa/ANGLE did not work on this PC -> OpenGL and restart
+#endif
 		return SDL_FALSE;
 	}
 
 	Impl_SetWindowIcon();
 
+#ifdef RR_D3D9
+	if (g_d3d9)
+	{
+		if (Impl_CreateD3d9())
+			return SDL_TRUE;
+		// Direct3D 9 failed: new window with OpenGL
+		SDL_DestroyWindow(window);
+		window = NULL;
+		g_d3d9 = false;
+		g_d3d9_failed = true;
+#ifdef HWRENDER
+		rr_fill_hwd_gl(); // the HWD table goes back to OpenGL
+#endif
+		return Impl_CreateWindow(fullscreen);
+	}
+#endif
+
 	return Impl_CreateContext();
 }
+
+#ifdef RR_D3D9
+// ---- Live graphics API switch (PC). Done by hand: the game could only switch Software <-> Legacy GL.
+// Every API switch is live (OpenGL, Mesa, ANGLE, D3D9). DX9 <-> DX9Ex keeps the window and only
+// recreates the device; GL <-> D3D9 keeps the GL window hidden; GL <-> another GL implementation recreates everything.
+// Legacy GL (HWD) state lives in the GL context. Before that context is destroyed (live API switch),
+// call RR_LegacyGLContextLost with THAT context current:
+// textures, shaders, VBOs (sky, static cache) and models are released; everything is rebuilt in the new context.
+extern void RR_GLContextLost(void);     // hardware/r_opengl/r_opengl.cpp
+extern void HWR_SkyContextLost(void);   // hardware/hw_main.cpp
+extern void HWR_UnloadAllModels(void);  // hardware/hw_md2.cpp
+extern "C" void OglSdlResetInfo(void);  // sdl/ogl_sdl.c
+static void RR_LegacyGLContextLost(void)
+{
+#ifdef HWRENDER
+	if (vid.glstate == VID_GL_LIBRARY_LOADED || g_gl_hw_used)
+	{
+		HWR_ClearAllTextures();
+		RR_GLContextLost();
+		HWR_SkyContextLost();
+		HWR_UnloadAllModels();
+		g_gl_reset_pending = true;
+		CONS_Printf("[GFXAPI] Legacy GL: GPU state released (rebuilt in the new context)\n");
+	}
+	g_gl_hw_used = false;
+	OglSdlResetInfo();
+#endif
+}
+
+static void RR_DropSavedGl(void)
+{
+	if (!g_gl_saved_window)
+		return;
+	SDL_GL_MakeCurrent(g_gl_saved_window, g_gl_saved_ctx); // the GL RHI and Legacy GL are freed with their context alive
+	RR_LegacyGLContextLost();
+	g_gl_saved_rhi.reset();
+	if (g_gl_saved_ctx)
+		SDL_GL_DeleteContext(g_gl_saved_ctx);
+	SDL_DestroyWindow(g_gl_saved_window);
+	g_gl_saved_window = NULL;
+	g_gl_saved_ctx = NULL;
+}
+
+extern "C" int RRGfx_GLStale(void)
+{
+	return 0; // Legacy GL is always rebuilt correctly in a new context
+}
+
+extern "C" int RRGfx_LiveOK(int api, int renderer)
+{
+	(void)renderer;
+	// Everything is live (OpenGL, Mesa, ANGLE, D3D9). The "safe switch" (rrapirestart) is decided in cvars.cpp.
+	// Exception: Mesa already started with the other driver (DX12 <-> Vulkan) = restart.
+	if (RRGfx_IsMesa(api) && RRGfx_MesaLoadedApi() >= 0 && RRGfx_MesaLoadedApi() != api)
+		return 0;
+	return window != NULL && rendermode != render_none;
+}
+
+extern "C" void RRGfx_LiveSwitch(int api, int renderer)
+{
+	g_api_swap = api;
+	g_api_swap_renderer = renderer;
+	setmodeneeded = vid.modenum + 1; // forces SCR_SetMode -> VID_SetMode -> VID_CheckRenderer
+}
+
+// Destroys the current GL window (with its RHI and Legacy GL) and releases its OpenGL DLL
+static void RR_DestroyGlWindow(void)
+{
+	if (window && sdlglcontext)
+		SDL_GL_MakeCurrent(window, sdlglcontext);
+	RR_LegacyGLContextLost();
+	g_rhi.reset();
+	if (sdlglcontext)
+		SDL_GL_DeleteContext(sdlglcontext);
+	sdlglcontext = NULL;
+	if (window)
+		SDL_DestroyWindow(window);
+	window = NULL;
+}
+
+static void RR_LiveSwitchNow(void)
+{
+	const int api = g_api_swap;
+	const int renderer = g_api_swap_renderer;
+	g_api_swap = -1;
+
+	const bool to_d3d = (api == RRGFX_DX9 || api == RRGFX_DX9EX);
+	const int to_impl = (RRGfx_IsMesa(api) || RRGfx_IsAngle(api)) ? api : -1; // requested GL implementation
+	bool restored_gl = false;
+	if (window)
+	{
+		SDL_GetWindowPosition(window, &g_keep_winx, &g_keep_winy);
+		g_keep_winpos = true;
+	}
+	CONS_Printf("[GFXAPI] live switch: %s -> %s\n", RRGfx_Name(RRGfx_Active()), RRGfx_Name(api));
+
+	g_api_override = !to_d3d ? 0 : (api == RRGFX_DX9EX ? 2 : 1);
+	g_d3d9_failed = false;
+
+	if (to_d3d && g_d3d9_active)
+	{
+		// Same window: only the device is recreated (DX9 <-> DX9Ex)
+		g_rhi.reset();
+		g_d3d9_active = false;
+		g_d3d9_ex = (api == RRGFX_DX9EX);
+		if (!Impl_CreateD3d9())
+		{
+			// Failed: new window with OpenGL (Impl_CreateWindow already knows how to fall back)
+			g_api_override = 0;
+			SDL_DestroyWindow(window);
+			window = NULL;
+			Impl_CreateWindow(static_cast<SDL_bool>(USE_FULLSCREEN));
+		}
+	}
+	else if (to_d3d)
+	{
+		// GL (OpenGL / Mesa / ANGLE) -> D3D9: the GL window is kept hidden (with its context and RHI alive).
+#ifdef HWRENDER
+		if (rendermode == render_opengl && vid.glstate == VID_GL_LIBRARY_LOADED)
+			HWR_ClearAllTextures(); // same as when switching to Software
+#endif
+		RR_DropSavedGl(); // in case an old one was left
+		g_gl_saved_window = window;
+		g_gl_saved_ctx = sdlglcontext;
+		g_gl_saved_rhi = std::move(g_rhi);
+		g_gl_saved_glstate = vid.glstate;
+		SDL_GL_MakeCurrent(window, NULL);
+		SDL_HideWindow(window);
+		window = NULL;
+		sdlglcontext = NULL;
+		Impl_CreateWindow(static_cast<SDL_bool>(USE_FULLSCREEN));
+		if (!g_d3d9_active)
+			RR_DropSavedGl(); // D3D9 failed: Impl_CreateWindow already made a NEW GL window; the saved one is not needed
+	}
+	else if (g_d3d9_active && g_gl_saved_window && g_mesa_api == to_impl)
+	{
+		// D3D9 -> the same GL that was saved: the window is restored (Legacy GL is still valid).
+		g_rhi.reset();
+		g_d3d9_active = false;
+		SDL_DestroyWindow(window);
+		window = g_gl_saved_window;
+		sdlglcontext = g_gl_saved_ctx;
+		g_rhi = std::move(g_gl_saved_rhi);
+		g_rhi_generation += 1;
+		g_gl_saved_window = NULL;
+		g_gl_saved_ctx = NULL;
+		SDL_ShowWindow(window);
+		SDL_GL_MakeCurrent(window, sdlglcontext);
+		Impl_SetWindowIcon();
+		restored_gl = true;
+	}
+	else
+	{
+		// Another GL implementation (plain OpenGL <-> Mesa DX12 <-> ANGLE DX11/Vulkan), or from D3D9 to a GL
+		// different from the saved one: GL windows out, old DLL out, the new one is loaded and a new window is created.
+		if (g_d3d9_active)
+		{
+			RR_DropSavedGl();
+			g_rhi.reset();
+			g_d3d9_active = false;
+			SDL_DestroyWindow(window);
+			window = NULL;
+		}
+		else
+			RR_DestroyGlWindow();
+		rr_release_impl();
+		if (!rr_apply_impl(to_impl))
+			rr_apply_impl(-1); // failed: plain OpenGL
+		Impl_CreateWindow(static_cast<SDL_bool>(USE_FULLSCREEN));
+	}
+
+	if (!g_d3d9_active)
+	{
+		// A GL window is back (or DX9 failed): Legacy GL can be selected again
+		RRGfx_SetActive(g_mesa_api >= 0 ? g_mesa_api : RRGFX_OPENGL);
+		g_api_override = 0;
+		// GL window restored: Legacy GL keeps its state, no need to restart it
+		vid.glstate = restored_gl ? g_gl_saved_glstate : VID_GL_LIBRARY_NOTLOADED;
+		if (restored_gl)
+			CONS_Printf("[GFXAPI] GL window restored (Legacy GL keeps its state)\n");
+#ifdef HWRENDER
+		rr_fill_hwd_gl();
+#endif
+	}
+#ifdef HWRENDER
+	else
+		HWD.pfnInit = rr_d3d9_nohw;
+#endif
+
+	rendermode = render_soft;
+	// The hwr2 state pointed to the old RHI: rebuild it NOW (SDLSetMode draws a frame right away) and open the new frame's pass.
+	srb2::sys::invalidate_rhi(); // the new RHI pointer could be equal to the old one
+	if (g_rhi)
+		I_StartDisplayUpdate();
+	setrenderneeded = (renderer == 2 && !g_d3d9_active) ? 2 : 0;
+	CV_StealthSetValue(&cv_renderer, setrenderneeded ? 2 : 1);
+	RRGfx_SyncMenu();
+	if (!RR_TestWindow())
+		SDL_RaiseWindow(window);
+}
+#else
+// Without D3D9 (Linux/macOS): no live API switch; cvars.cpp asks for a restart.
+extern "C" int RRGfx_GLStale(void) { return 0; }
+extern "C" int RRGfx_LiveOK(int api, int renderer) { (void)api; (void)renderer; return 0; }
+extern "C" void RRGfx_LiveSwitch(int api, int renderer) { (void)api; (void)renderer; }
+#endif
 
 static void Impl_SetWindowIcon(void)
 {
@@ -1511,8 +2200,32 @@ static void Impl_VideoSetupBuffer(void)
 
 extern "C" CVarList* cvlist_graphics_driver;
 
+#ifdef RR_D3D9
+// If something throws an exception nobody catches (e.g. the D3D9 backend on an odd GPU), log WHAT it was before aborting.
+static void RR_TerminateLog(void)
+{
+	try
+	{
+		if (std::current_exception())
+			std::rethrow_exception(std::current_exception());
+	}
+	catch (const std::exception& e)
+	{
+		I_OutputMsg("[TERMINATE] uncaught exception: %s\n", e.what());
+	}
+	catch (...)
+	{
+		I_OutputMsg("[TERMINATE] uncaught exception (unknown type)\n");
+	}
+	std::abort();
+}
+#endif
+
 void I_StartupGraphics(void)
 {
+#ifdef RR_D3D9
+	std::set_terminate(RR_TerminateLog);
+#endif
 	if (dedicated)
 	{
 		rendermode = render_none;
@@ -1527,7 +2240,7 @@ void I_StartupGraphics(void)
 	COM_AddCommand ("vid_mode", VID_Command_Mode_f);
 	CV_RegisterList(cvlist_graphics_driver);
 	disable_mouse = static_cast<SDL_bool>(M_CheckParm("-nomouse"));
-	disable_fullscreen = M_CheckParm("-win") ? SDL_TRUE : SDL_FALSE;
+	disable_fullscreen = (M_CheckParm("-win") || M_CheckParm("-testwindow")) ? SDL_TRUE : SDL_FALSE;
 
 	keyboard_started = true;
 
@@ -1611,7 +2324,8 @@ void I_StartupGraphics(void)
 
 	VID_Command_Info_f();
 
-	SDL_RaiseWindow(window);
+	if (!RR_TestWindow()) // -testwindow: do not steal focus
+		SDL_RaiseWindow(window);
 
 	graphics_started = true;
 }
@@ -1623,49 +2337,22 @@ void VID_StartupOpenGL(void)
 	if (!glstartup)
 	{
 		CONS_Printf("VID_StartupOpenGL()...\n");
-		*(void**)&HWD.pfnInit             = hwSym("Init",NULL);
-		*(void**)&HWD.pfnFinishUpdate     = NULL;
-		*(void**)&HWD.pfnDraw2DLine       = hwSym("Draw2DLine",NULL);
-		*(void**)&HWD.pfnDrawPolygon      = hwSym("DrawPolygon",NULL);
-		*(void**)&HWD.pfnDrawIndexedTriangles = hwSym("DrawIndexedTriangles",NULL);
-		*(void**)&HWD.pfnRenderSkyDome    = hwSym("RenderSkyDome",NULL);
-		*(void**)&HWD.pfnSetBlend         = hwSym("SetBlend",NULL);
-		*(void**)&HWD.pfnClearBuffer      = hwSym("ClearBuffer",NULL);
-		*(void**)&HWD.pfnSetTexture       = hwSym("SetTexture",NULL);
-		*(void**)&HWD.pfnUpdateTexture    = hwSym("UpdateTexture",NULL);
-		*(void**)&HWD.pfnDeleteTexture    = hwSym("DeleteTexture",NULL);
-		*(void**)&HWD.pfnReadRect         = hwSym("ReadRect",NULL);
-		*(void**)&HWD.pfnGClipRect        = hwSym("GClipRect",NULL);
-		*(void**)&HWD.pfnClearMipMapCache = hwSym("ClearMipMapCache",NULL);
-		*(void**)&HWD.pfnSetSpecialState  = hwSym("SetSpecialState",NULL);
-		*(void**)&HWD.pfnSetPalette       = hwSym("SetPalette",NULL);
-		*(void**)&HWD.pfnGetTextureUsed   = hwSym("GetTextureUsed",NULL);
-		*(void**)&HWD.pfnDrawModel        = hwSym("DrawModel",NULL);
-		*(void**)&HWD.pfnCreateModelVBOs  = hwSym("CreateModelVBOs",NULL);
-		*(void**)&HWD.pfnSetTransform     = hwSym("SetTransform",NULL);
-		*(void**)&HWD.pfnPostImgRedraw    = hwSym("PostImgRedraw",NULL);
-		*(void**)&HWD.pfnFlushScreenTextures=hwSym("FlushScreenTextures",NULL);
-		*(void**)&HWD.pfnStartScreenWipe  = hwSym("StartScreenWipe",NULL);
-		*(void**)&HWD.pfnEndScreenWipe    = hwSym("EndScreenWipe",NULL);
-		*(void**)&HWD.pfnDoScreenWipe     = hwSym("DoScreenWipe",NULL);
-		*(void**)&HWD.pfnDrawIntermissionBG=hwSym("DrawIntermissionBG",NULL);
-		*(void**)&HWD.pfnMakeScreenTexture= hwSym("MakeScreenTexture",NULL);
-		*(void**)&HWD.pfnMakeScreenFinalTexture=hwSym("MakeScreenFinalTexture",NULL);
-		*(void**)&HWD.pfnDrawScreenFinalTexture=hwSym("DrawScreenFinalTexture",NULL);
-
-		*(void**)&HWD.pfnCompileShaders   = hwSym("CompileShaders",NULL);
-		*(void**)&HWD.pfnCleanShaders     = hwSym("CleanShaders",NULL);
-		*(void**)&HWD.pfnSetShader        = hwSym("SetShader",NULL);
-		*(void**)&HWD.pfnUnSetShader      = hwSym("UnSetShader",NULL);
-
-		*(void**)&HWD.pfnSetShaderInfo    = hwSym("SetShaderInfo",NULL);
-		*(void**)&HWD.pfnLoadCustomShader = hwSym("LoadCustomShader",NULL);
-		*(void**)&HWD.pfnResetRenderState = hwSym("ResetRenderState",NULL);
+#ifdef RR_D3D9
+		rr_prepare_angle(); // ANGLE (DX11/Vulkan): Legacy GL through r_gles.inl
+		if (rr_d3d9_requested(NULL))
+			HWD.pfnInit = rr_d3d9_nohw; // no GPU 3D: Init fails and the game stays in Software
+		else
+#endif
+			rr_fill_hwd_gl();
 		glstartup = true;
 	}
 
 	// For RHI-Legacy GL compatibility: Init always fetches GL functions, but only dlsym's libraries once.
 	vid.glstate = HWD.pfnInit() ? VID_GL_LIBRARY_LOADED : VID_GL_LIBRARY_ERROR; // let load the OpenGL library
+#ifdef RR_D3D9
+	if (vid.glstate == VID_GL_LIBRARY_LOADED)
+		g_gl_hw_used = true;
+#endif
 
 	if (vid.glstate == VID_GL_LIBRARY_ERROR)
 	{
@@ -1690,6 +2377,9 @@ void I_ShutdownGraphics(void)
 	}
 	graphics_started = false;
 
+#ifdef RR_D3D9
+	RR_DropSavedGl();
+#endif
 #ifdef HWRENDER
 	if (GLUhandle)
 		hwClose(GLUhandle);
@@ -1733,6 +2423,13 @@ void srb2::cvarhandler::on_set_vid_wait()
 		interval = 1;
 	}
 
+#ifdef RR_D3D9
+	if (g_d3d9_active)
+	{
+		rhi::d3d9_set_vsync(g_rhi.get(), interval != 0);
+		return;
+	}
+#endif
 	if (sdlglcontext == nullptr || SDL_GL_GetCurrentContext() != sdlglcontext)
 	{
 		return;

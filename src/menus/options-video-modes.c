@@ -114,9 +114,9 @@ static void M_VideoModeMenu(void)
 // special menuitem key handler for video mode list
 void M_HandleVideoModes(INT32 ch)
 {
-
 	const UINT8 pid = 0;
 	(void)ch;
+
 
 	if (optionsmenu.vidm_testingmode > 0)
 	{

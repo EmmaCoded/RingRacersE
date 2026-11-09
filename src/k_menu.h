@@ -410,6 +410,7 @@ typedef enum
 	vaopt_skybox,
 	vaopt_parallel,
 	vaopt_frameskip,
+	vaopt_lowend,
 	vaopt_spacer2,
 	vaopt_spacer3,
 	vaopt_spacer4,
@@ -1163,6 +1164,11 @@ void M_GameplayOptions(INT32 choice);
 void M_ServerOptions(INT32 choice);
 
 void M_RefreshAdvancedVideoOptions(void);
+// Position of each line in the last M_DrawGenericOptions (M_OPTIONITEMY_NONE = not drawn)
+#define M_OPTIONITEMY_MAX 64
+#define M_OPTIONITEMY_NONE (-32768)
+extern INT32 M_OptionItemY[M_OPTIONITEMY_MAX];
+extern INT32 M_OptionItemX;
 
 void M_HandleItemToggles(INT32 choice);	// For item toggling
 void M_EraseData(INT32 choice);	// For data erasing

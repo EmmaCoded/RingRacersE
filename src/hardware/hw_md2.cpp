@@ -26,7 +26,7 @@
 #include "../doomstat.h"
 #include "../fastcmp.h"
 
-#ifdef HWRENDER
+#if defined(HWRENDER) // builds without models: empty functions (below)
 #include "hw_drv.h"
 #include "hw_light.h"
 #include "hw_md2.h"
@@ -82,6 +82,28 @@
 
 md2_t md2_models[NUMSPRITES];
 md2_t md2_playermodels[MAXSKINS];
+
+// Live API switch. The model VBOs died with the old context and the format
+// (tinyframes / floats, rr_gl_floatmodels) depends on the API: they are unloaded and reloaded on demand when drawn.
+void HWR_UnloadAllModels(void)
+{
+	INT32 n = 0;
+	for (size_t i = 0; i < NUMSPRITES; i++)
+		if (md2_models[i].model)
+		{
+			UnloadModel(md2_models[i].model);
+			md2_models[i].model = NULL;
+			n++;
+		}
+	for (size_t i = 0; i < MAXSKINS; i++)
+		if (md2_playermodels[i].model)
+		{
+			UnloadModel(md2_playermodels[i].model);
+			md2_playermodels[i].model = NULL;
+			n++;
+		}
+	CONS_Printf("[GFXAPI] %d 3D models unloaded (reloaded when seen)\n", n);
+}
 
 
 /*
@@ -669,11 +691,11 @@ void HWR_AddSpriteModel(size_t spritenum) // For sprites that were added after s
 
 	// Read the models.dat file
 	//Filename checking fixed ~Monster Iestyn and Golden
-	f = fopen(va("%s" PATHSEP" %s", srb2home, "models.dat"), "rt");
+	f = fopen(va("%s" PATHSEP "%s", srb2home, "models.dat"), "rt");
 
 	if (!f)
 	{
-		f = fopen(va("%s" PATHSEP" %s", srb2path, "models.dat"), "rt");
+		f = fopen(va("%s" PATHSEP "%s", srb2path, "models.dat"), "rt");
 		if (!f)
 		{
 			CONS_Printf("%s %s\n", M_GetText("Error while loading models.dat:"), strerror(errno));
@@ -1087,15 +1109,15 @@ static void HWR_CreateBlendedTexture(patch_t *gpatch, patch_t *blendgpatch, GLMi
 					INT32 tempcolor;
 
 					tempcolor = ((image->s.red * (255-blendimage->s.alpha)) / 255) + ((blendcolor.s.red * blendimage->s.alpha) / 255);
-					tempcolor = std::min(255, tempcolor);
+					tempcolor = std::min<INT32>(255, tempcolor);
 					cur->s.red = (UINT8)tempcolor;
 
 					tempcolor = ((image->s.green * (255-blendimage->s.alpha)) / 255) + ((blendcolor.s.green * blendimage->s.alpha) / 255);
-					tempcolor = std::min(255, tempcolor);
+					tempcolor = std::min<INT32>(255, tempcolor);
 					cur->s.green = (UINT8)tempcolor;
 
 					tempcolor = ((image->s.blue * (255-blendimage->s.alpha)) / 255) + ((blendcolor.s.blue * blendimage->s.alpha) / 255);
-					tempcolor = std::min(255, tempcolor);
+					tempcolor = std::min<INT32>(255, tempcolor);
 					cur->s.blue = (UINT8)tempcolor;
 					cur->s.alpha = image->s.alpha;
 				}
@@ -1277,7 +1299,9 @@ static UINT8 HWR_GetModelSprite2(md2_t *md2, skin_t *skin, UINT8 spr2, player_t 
 static void adjustTextureCoords(model_t *model, patch_t *patch)
 {
 	int i;
-	GLPatch_t *gpatch = ((GLPatch_t *)patch->hardware);
+	// Ring Racers E: Patch_CreateGL instead of patch->hardware: after a live API switch HWR_ClearAllTextures leaves
+	// hardware = NULL, and a reloaded model adjusted its UVs with the sprite before it was recreated (crash).
+	GLPatch_t *gpatch = (GLPatch_t *)Patch_CreateGL(patch);
 
 	for (i = 0; i < model->numMeshes; i++)
 	{
@@ -1827,4 +1851,10 @@ boolean HWR_DrawModel(gl_vissprite_t *spr)
 	return true;
 }
 
+#elif defined(HWRENDER) // no 3D models (saves ~260 KB of fixed RAM)
+#include "hw_md2.h"
+void HWR_InitModels(void) {}
+void HWR_AddPlayerModel(INT32 skin) { (void)skin; }
+void HWR_AddSpriteModel(size_t spritenum) { (void)spritenum; }
+boolean HWR_DrawModel(gl_vissprite_t *spr) { (void)spr; return false; }
 #endif //HWRENDER

@@ -2008,6 +2008,7 @@ void CV_CheatsChanged(void)
 // Returns true if the variable's current value is its default value
 boolean CV_IsSetToDefault(consvar_t *v)
 {
+	if (!v || !v->defaultvalue || !v->string) return true; // unregistered cvar = do not crash
 	return (!(strcmp(v->defaultvalue, v->string)));
 }
 

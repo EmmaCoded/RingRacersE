@@ -2489,6 +2489,7 @@ static UINT8 V_GetGenericButtonCodeWidth(UINT8 c, boolean largebutton)
 		break;
 
 	case gb_back:
+	case gb_touch:
 		x -= largebutton ? 2 : 6;
 		break;
 
@@ -2885,6 +2886,7 @@ void V_DrawStringScaled(
 								case gb_rt: return {{2, 2, Draw::GenericButton::rt}};
 								case gb_start: return {{2, 2, Draw::GenericButton::start}};
 								case gb_back: return {{2, 2, Draw::GenericButton::back}};
+								case gb_touch: return {{2, 2, Draw::GenericButton::touch}};
 								case gb_ls: return {{1, 2, Draw::GenericButton::ls}};
 								case gb_rs: return {{1, 2, Draw::GenericButton::rs}};
 								case gb_dpad: return {{2, 2, Draw::GenericButton::dpad}};
@@ -2908,6 +2910,7 @@ void V_DrawStringScaled(
 									case gb_rt: return {{1, 4, Draw::GenericButton::rt}};
 									case gb_start: return {{1, 6, Draw::GenericButton::start}};
 									case gb_back: return {{1, 6, Draw::GenericButton::back}};
+									case gb_touch: return {{1, 6, Draw::GenericButton::touch}};
 									case gb_ls: return {{1, 5, Draw::GenericButton::ls}};
 									case gb_rs: return {{1, 5, Draw::GenericButton::rs}};
 									case gb_dpad: return {{1, 4, Draw::GenericButton::dpad}};

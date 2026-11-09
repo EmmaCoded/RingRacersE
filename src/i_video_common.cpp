@@ -10,6 +10,7 @@
 
 #include "i_video.h"
 
+
 #include <algorithm>
 #include <array>
 #include <vector>
@@ -31,7 +32,9 @@
 #include "d_netcmd.h" // kill
 #include "doomstat.h" // kill
 #include "s_sound.h"  // kill
-#include "sdl/ogl_sdl.h"
+#if defined(HWRENDER)
+#include "sdl/ogl_sdl.h" // SDL-only; its only use (OglSdlFinishUpdate) is already behind #ifdef HWRENDER
+#endif
 #include "st_stuff.h" // kill
 
 // Legacy FinishUpdate Draws
@@ -59,6 +62,11 @@ static bool g_imgui_frame_active = false;
 static HardwareState g_hw_state;
 
 Handle<Rhi> srb2::sys::g_current_rhi = kNullHandle;
+
+void srb2::sys::invalidate_rhi()
+{
+	g_last_known_rhi = nullptr;
+}
 
 static bool rhi_changed(Rhi* rhi)
 {
@@ -167,7 +175,7 @@ static void temp_legacy_finishupdate_draws()
 	ST_drawDebugInfo();
 }
 
-#ifdef HWRENDER
+#if defined(HWRENDER)
 static void finish_legacy_ogl_update()
 {
 	temp_legacy_finishupdate_draws();
@@ -323,6 +331,7 @@ void I_FinishUpdate(void)
 	// Immediately prepare to begin drawing the next frame
 	I_StartDisplayUpdate();
 }
+
 
 void VID_BeginLegacyGLRenderPass(void)
 {

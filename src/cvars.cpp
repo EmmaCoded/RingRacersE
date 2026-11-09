@@ -31,6 +31,13 @@
 
 #include "command.h"
 #include "doomdef.h"
+#include "hardware/rr_gfxapi.h"
+#include "console.h" // CONS_Alert
+#include "k_menu.h" // M_StartMessage
+#include "m_misc.h" // M_SaveConfig
+#include "i_system.h" // I_Quit
+#include "i_video.h" // rendermode
+#include "doomstat.h" // menuactive
 #include "doomtype.h"
 #include "m_fixed.h" // FRACUNIT
 #include "r_skins.h" // DEFAULTSKIN
@@ -370,7 +377,50 @@ consvar_t cv_fpscap = Player("fpscap", "Match refresh rate").values({
 });
 
 void SCR_ChangeFullscreen(void);
+// Ring Racers E: "Display Mode" in Video Options = the saved PREFERENCE: 0 Window, 1 Fullscreen, 2 Borderless.
+// cv_fullscreen + cv_rrborderless = the CURRENT state. F11 only changes the state (RR_ToggleDisplayMode):
+// with the Borderless preference it toggles Window <-> Borderless; with Window or Fullscreen, Window <-> Fullscreen.
+// The preference is applied at startup (RR_DisplayModeStartup, after the config is loaded).
+static void RR_DisplayModeChange(void);
+consvar_t cv_rrdisplaymode = Player("rrdisplaymode", "Fullscreen").values({
+	{0, "Window"}, {1, "Fullscreen"}, {2, "Borderless"},
+}).onchange(RR_DisplayModeChange);
 consvar_t cv_fullscreen = Player("fullscreen", "Yes").yes_no().onchange(SCR_ChangeFullscreen);
+
+// st: 0 Window, 1 Fullscreen, 2 Borderless
+static void RR_ApplyDisplayState(int st)
+{
+	CV_StealthSetValue(&cv_rrborderless, st == 2);
+	CV_StealthSetValue(&cv_fullscreen, st == 1);
+	SCR_ChangeFullscreen();
+}
+static void RR_DisplayModeChange(void)
+{
+	RR_ApplyDisplayState(cv_rrdisplaymode.value);
+}
+void RR_ToggleDisplayMode(void)
+{
+	const bool inwindow = !cv_fullscreen.value && !cv_rrborderless.value;
+	RR_ApplyDisplayState(inwindow ? (cv_rrdisplaymode.value == 2 ? 2 : 1) : 0);
+}
+void RR_DisplayModeStartup(void)
+{
+	bool found = false;
+	if (FILE *f = fopen(configfile, "r"))
+	{
+		char line[256];
+		while (fgets(line, sizeof line, f))
+			if (!strncmp(line, "rrdisplaymode ", 14))
+			{
+				found = true;
+				break;
+			}
+		fclose(f);
+	}
+	if (!found) // older config: the preference comes from the saved mode
+		CV_StealthSetValue(&cv_rrdisplaymode, cv_fullscreen.value ? 1 : (cv_rrborderless.value ? 2 : 0));
+	RR_ApplyDisplayState(cv_rrdisplaymode.value);
+}
 
 // Sound system toggles, saved into the config
 void GameDigiMusic_OnChange(void);
@@ -432,6 +482,147 @@ consvar_t cv_pauseifunfocused = Player("pauseifunfocused", "Yes").yes_no();
 
 extern CV_PossibleValue_t cv_renderer_t[];
 consvar_t cv_renderer = Player("renderer", "Software").flags(CV_NOLUA).values(cv_renderer_t).onchange(SCR_ChangeRenderer);
+// Graphics API from Video Options. The game starts in Software. An API this PC does not support
+// (or without a backend) is rejected and falls back to OpenGL.
+// Switching is live; with the hidden "safe switch" option (rrapirestart) the game asks to restart instead:
+// if accepted, the config is saved and a new copy of the game is launched.
+// Single menu option "Renderer": Software / Legacy GL / Direct3D 9 / Direct3DEx 9 / DX11 / DX12 / Vulkan
+void RRGfx_SyncMenu(void)
+{
+	const int act = RRGfx_Active();
+	const int gl = (rendermode == render_opengl) ? 1 : 0;
+	CV_StealthSetValue(&cv_rrrenderer, act == RRGFX_DX9 ? 2 : act == RRGFX_DX9EX ? 3 :
+		act == RRGFX_VULKAN ? 4 + gl : act == RRGFX_DX12 ? 6 + gl : act == RRGFX_DX11 ? 8 + gl : gl);
+	CV_StealthSetValue(&cv_gfxapi, act); // in case the config had an old name that was not recognized
+}
+
+static void RRGfx_RestartResponse(INT32 ch);
+
+static void RRGfx_AskRestart(int api)
+{
+	M_StartMessage(
+		"Changing API",
+		va("The game needs to restart\nto use %s.\n\nRESTART NOW?", RRGfx_Name(api)),
+		RRGfx_RestartResponse,
+		MM_YESNO,
+		NULL,
+		NULL
+	);
+}
+
+static void RRGfx_RestartResponse(INT32 ch)
+{
+	if (ch == MA_YES)
+	{
+		M_SaveConfig(NULL);
+		RRGfx_SpawnSelf();
+		I_Quit();
+	}
+	else
+	{
+		CV_StealthSetValue(&cv_gfxapi, RRGfx_Active()); // keeps the current API
+		CV_StealthSetValue(&cv_renderer, rendermode);
+		RRGfx_SyncMenu();
+	}
+}
+
+// LOW-END MODE (lighter game logic, see RR_LOWEND in rr_config.h).
+// rr_lowend = the value for the current course: set in P_LoadLevel (off in replays; online, the host decides).
+extern "C" int rr_lowend;
+int rr_lowend = 0;
+static void RR_LowEndChange(void)
+{
+	if (!menuactive)
+		return;
+	if (netgame && server)
+		M_StartMessage("Low-End Mode", M_GetText("Everyone in your game will switch\nwhen this round ends.\n"), NULL, MM_NOTHING, NULL, NULL);
+	else if (netgame)
+		M_StartMessage("Low-End Mode", M_GetText("In online games the host decides.\nThis takes effect the next time\nyou join a game.\n"), NULL, MM_NOTHING, NULL, NULL);
+	else if (gamestate == GS_LEVEL)
+		M_StartMessage("Low-End Mode", M_GetText("This takes effect on the next course.\n"), NULL, MM_NOTHING, NULL, NULL);
+}
+consvar_t cv_rrlowend = Player("rrlowend", "Off").on_off().onchange(RR_LowEndChange);
+
+// Ring Racers E online (only between E builds): netvars sent by the server (see rr_nete.c).
+// rrnetlowend = the game uses low-end mode (everyone reads it in P_LoadLevel). Only changes between rounds.
+// rrnetlowwait = one bit per low-end player waiting as a spectator until the round ends.
+extern "C" void RRNet_LowEndNetChanged(void);
+consvar_t cv_rrnetlowend = UnsavedNetVar("rrnetlowend", "Off").on_off().onchange_noinit(RRNet_LowEndNetChanged);
+consvar_t cv_rrnetlowwait = UnsavedNetVar("rrnetlowwait", "0").min_max(0, 65535);
+
+// Hidden option (only changed by hand in ringconfigE.cfg: rrapirestart "On"): ALWAYS restart the game
+// to switch API instead of switching live. The "safe switch", in case live switching fails on some PC.
+consvar_t cv_rrapirestart = Player("rrapirestart", "Off").on_off();
+
+// "Borderless Window" in Video Options. In windowed mode: no borders, at the corner of the screen and screen sized
+// (the game is scaled). Fullscreen wins over this option. See RR_ApplyWindowBorder in sdl/i_video.cpp.
+void SCR_ChangeFullscreen(void);
+consvar_t cv_rrborderless = Player("rrborderless", "Off").on_off().dont_save().onchange(SCR_ChangeFullscreen); // current state; the preference is cv_rrdisplaymode
+static int s_wantRenderer = 1;
+
+static void RRGfx_ChangeRenderer(void)
+{
+	const int v = cv_rrrenderer.value;
+	// 4/5 = Vulkan (OpenGL ES through ANGLE: Software or Legacy GL), 6/7 = DirectX 12 (OpenGL through Mesa)
+	// 8/9 = DirectX 11 (OpenGL ES through ANGLE: Software or Legacy GL)
+	const int api = v == 2 ? RRGFX_DX9 : v == 3 ? RRGFX_DX9EX : (v == 4 || v == 5) ? RRGFX_VULKAN : (v == 6 || v == 7) ? RRGFX_DX12 : (v == 8 || v == 9) ? RRGFX_DX11 : RRGFX_OPENGL;
+	const int rend = (v == 1 || v == 5 || v == 7 || v == 9) ? 2 : 1;
+	if (api == RRGfx_Active())
+	{
+		// Legacy GL after leaving it for D3D9 with stale state: needs a restart
+		if (rend == 2 && RRGfx_GLStale() && menuactive)
+		{
+			CV_StealthSetValue(&cv_renderer, rend);
+			RRGfx_AskRestart(api);
+			return;
+		}
+		CV_SetValue(&cv_renderer, rend);
+		return;
+	}
+	CV_StealthSetValue(&cv_renderer, rend); // saved in the config (for the restart)
+	s_wantRenderer = rend;
+	CV_SetValue(&cv_gfxapi, api);
+	s_wantRenderer = 1;
+	if (cv_gfxapi.value != api) // rejected (not supported)
+	{
+		CV_StealthSetValue(&cv_renderer, rendermode);
+		RRGfx_SyncMenu();
+	}
+}
+consvar_t cv_rrrenderer = Player("rrrenderer", "Software").flags(CV_NOLUA).values({
+	{0, "Software"}, {1, "Legacy GL"}, {2, "Direct3D 9"}, {3, "Direct3DEx 9"},
+	{4, "Software (Vulkan)"}, {5, "Legacy GL (Vulkan)"}, {6, "Software (DX12)"}, {7, "Legacy GL (DX12)"},
+	{8, "Software (DX11)"}, {9, "Legacy GL (DX11)"},
+}).dont_save().onchange(RRGfx_ChangeRenderer);
+
+static void RRGfx_ChangeAPI(void)
+{
+	const int api = cv_gfxapi.value;
+	if (api == RRGfx_Active())
+		return;
+	if (api != RRGFX_OPENGL && !RRGfx_Detected(api))
+		CONS_Alert(CONS_WARNING, "%s is not supported on this PC.\n", RRGfx_Name(api));
+	else if (api != RRGFX_OPENGL && !RRGfx_Implemented(api))
+		CONS_Alert(CONS_WARNING, "%s is not available yet.\n", RRGfx_Name(api));
+	else
+	{
+		// Live switch (no restart), unless the "safe switch" is requested or it is not possible
+		if (menuactive && !cv_rrapirestart.value && RRGfx_LiveOK(api, s_wantRenderer))
+		{
+			RRGfx_LiveSwitch(api, s_wantRenderer);
+			return;
+		}
+		// While loading the config (no menu open) nothing is asked
+		if (menuactive)
+			RRGfx_AskRestart(api);
+		return;
+	}
+	CV_StealthSetValue(&cv_gfxapi, RRGfx_Active());
+}
+consvar_t cv_gfxapi = Player("gfxapi", "OpenGL").flags(CV_NOLUA).values({
+	{RRGFX_OPENGL, "OpenGL"}, {RRGFX_DX9, "Direct3D 9"}, {RRGFX_DX9EX, "Direct3DEx 9"}, {RRGFX_DX11, "DirectX 11"},
+	{RRGFX_DX12, "DirectX 12"}, {RRGFX_VULKAN, "Vulkan"},
+}).onchange(RRGfx_ChangeAPI);
 consvar_t cv_parallelsoftware = Player("parallelsoftware", "On").on_off();
 
 consvar_t cv_renderview = Player("renderview", "On").values({{0, "Off"}, {1, "On"}, {2, "Force"}}).dont_save();
@@ -473,7 +664,9 @@ consvar_t cv_splitdevice = Player("splitdevice", "Off").on_off();
 void Splitplayers_OnChange(void);
 consvar_t cv_splitplayers = Player("splitplayers", "One").values({{1, "One"}, {2, "Two"}, {3, "Three"}, {4, "Four"}}).onchange(Splitplayers_OnChange).dont_save();
 
-consvar_t cv_ticrate = Player(cvlist_screen)("showfps", "No").yes_no();
+consvar_t cv_ticrate = Player(cvlist_screen)("showfps",
+	"No"
+	).yes_no();
 consvar_t cv_tilting = Player("tilting", "On").on_off();
 
 // first time memory

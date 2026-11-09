@@ -93,6 +93,7 @@ struct Draw2dList
 	static constexpr const std::size_t kMaxVertices = 65536;
 };
 
+
 class Draw2dQuadBuilder;
 class Draw2dVerticesBuilder;
 
@@ -116,6 +117,17 @@ public:
 
 	Draw2dQuadBuilder begin_quad() noexcept;
 	Draw2dVerticesBuilder begin_verts() noexcept;
+
+	// Clear WITHOUT freeing the memory. "g_2d = Twodee()" every
+	// frame used to free the vectors, which then grew again by doubling -> on a
+	// fragmented heap an emplace_back asked for a contiguous block that was not there (bad_alloc
+	// loading 765Stadium).
+	void reset_keep() noexcept
+	{
+		if (lists_.size() > 1) lists_.resize(1);
+		for (auto& l : lists_) { l.vertices.clear(); l.indices.clear(); l.cmds.clear(); }
+		current_verts_.clear(); current_indices_.clear();
+	}
 
 	typename std::vector<Draw2dList>::iterator begin() noexcept { return lists_.begin(); }
 	typename std::vector<Draw2dList>::iterator end() noexcept { return lists_.end(); }

@@ -59,9 +59,13 @@ In netgames, the host decides: if the host uses Low-End Mode, every player uses 
 - Legacy GL fix: floor sprites (like sneaker panels) on slopes are no longer hidden under the floor.
 - A damaged `srvbans.json` no longer stops the game: it is renamed to `srvbans.json.bad` and the game continues.
 
+## Download
+
+Windows 64-bit builds are on the [Releases](https://github.com/EmmaCoded/RingRacersE/releases) page. Copy the files into your Ring Racers 2.4 folder and run `RingRacersE.exe`.
+
 ## Documentation
 
-The [wiki](wiki/Home.md) explains every change compared to the official code, and why it was made.
+The [wiki](https://github.com/EmmaCoded/RingRacersE/wiki) explains every change compared to the official code, and why it was made (a copy is in the [wiki](wiki/Home.md) folder).
 
 ## Building from source (Windows)
 
@@ -95,6 +99,7 @@ Licenses: ANGLE is BSD-3-Clause, Mesa is MIT, and the Vulkan loader (`vulkan-1.d
 - **Kart Krew Dev** made Dr. Robotnik's Ring Racers. The game, its code and its content are their work; Ring Racers E only changes part of the code. Links: [website](https://www.kartkrew.org/), [Discord](https://www.kartkrew.org/discord), [official repository](https://github.com/KartKrewDev/RingRacers).
 - Ring Racers is based on [Sonic Robo Blast 2](https://srb2.org/), itself based on [Doom Legacy](http://doomlegacy.sourceforge.net/).
 - [ANGLE](https://chromium.googlesource.com/angle/angle) (Google and contributors), [Mesa](https://www.mesa3d.org/), [mesa-dist-win](https://github.com/pal1000/mesa-dist-win) (pal1000), Vulkan loader (Khronos Group).
+- **Craftyawesome** (Nintendo Switch port of Ring Racers), for advice on graphics APIs and performance.
 - Claude (Anthropic) was used as a programming assistant.
 
 ## License

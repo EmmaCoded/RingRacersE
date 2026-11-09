@@ -7,8 +7,9 @@
 [ANGLE](https://chromium.googlesource.com/angle/angle) is the library that browsers use to run WebGL on
 top of Direct3D 11 or Vulkan. It exposes **OpenGL ES 3.0** (through EGL), not desktop OpenGL.
 
-Ring Racers E loads ANGLE from the `angle/` folder next to the executable (`libEGL.dll`, `libGLESv2.dll`,
-and `vulkan-1.dll` for Vulkan) and tells SDL2 to create an ES context through EGL instead of WGL. Both the
+Ring Racers E loads ANGLE (`libEGL.dll`, `libGLESv2.dll`, and `vulkan-1.dll` for Vulkan) from the copy embedded
+in the executable, written to `%LOCALAPPDATA%\RingRacersEngle-<id>\` the first time (see
+[Embedded DLLs](Graphics-APIs.md#embedded-angle-and-mesa)), or from an `angle/` folder next to the executable if there is one, and tells SDL2 to create an ES context through EGL instead of WGL. Both the
 Software renderer (through the RHI) and Legacy GL can run on it.
 
 **Why:** it gives Legacy GL (3D models, shaders, the full hardware renderer) a Direct3D 11 or Vulkan path
@@ -94,5 +95,5 @@ pointers, because the next context may come from a different DLL. See [Graphics 
 ## Getting the DLLs
 
 ANGLE is not part of the repository. See the README section
-[Optional folders](../README.md#optional-folders-angle-and-mesa). ANGLE is BSD-3-Clause and the Vulkan loader
+[ANGLE and Mesa](../README.md#angle-and-mesa-directx-11-vulkan-directx-12). ANGLE is BSD-3-Clause and the Vulkan loader
 is Apache-2.0; their license files must be shipped with the DLLs.

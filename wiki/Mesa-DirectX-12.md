@@ -5,7 +5,9 @@
 ## What it is
 
 [Mesa](https://www.mesa3d.org/) can expose desktop OpenGL on top of Direct3D 12 ("GLOn12", Gallium driver
-`d3d12`). Ring Racers E loads Mesa's `opengl32.dll` from the `mesa/` folder next to the executable
+`d3d12`). Ring Racers E loads Mesa's `opengl32.dll` from the copy embedded in the executable (written to
+`%LOCALAPPDATA%\RingRacersE\mesa-<id>\` the first time, see [Embedded DLLs](Graphics-APIs.md#embedded-angle-and-mesa))
+or from a `mesa/` folder next to the executable if there is one
 (with `libgallium_wgl.dll` and `dxil.dll`, from [mesa-dist-win](https://github.com/pal1000/mesa-dist-win)).
 
 Unlike ANGLE, Mesa gives full desktop OpenGL, so Legacy GL runs on it without the ES emulation.
@@ -54,5 +56,5 @@ recreates it if needed (before, it read a NULL pointer and crashed when such a m
 ## Getting the DLLs
 
 Mesa is not part of the repository. See the README section
-[Optional folders](../README.md#optional-folders-angle-and-mesa). Mesa is MIT licensed; its license file must
+[ANGLE and Mesa](../README.md#angle-and-mesa-directx-11-vulkan-directx-12). Mesa is MIT licensed; its license file must
 be shipped with the DLLs.

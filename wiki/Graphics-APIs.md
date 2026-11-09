@@ -14,8 +14,8 @@ Ring Racers E adds a list of graphics APIs in Video > Advanced > **Rendering Bac
 |---|---|---|
 | OpenGL | Software and Legacy GL | Official code, system `opengl32.dll` |
 | Direct3D 9 / Direct3DEx 9 | Software only | [Direct3D 9 backend](Direct3D-9-Backend.md) |
-| DirectX 11 / Vulkan | Legacy GL (*) | [ANGLE](ANGLE-DirectX-11-and-Vulkan.md), `angle/` folder |
-| DirectX 12 | Legacy GL (*) | [Mesa GLOn12](Mesa-DirectX-12.md), `mesa/` folder, 64-bit only |
+| DirectX 11 / Vulkan | Legacy GL (*) | [ANGLE](ANGLE-DirectX-11-and-Vulkan.md), embedded in the exe |
+| DirectX 12 | Legacy GL (*) | [Mesa GLOn12](Mesa-DirectX-12.md), embedded in the exe, 64-bit only |
 
 (*) Software through ANGLE or Mesa still works if it is set in the config file, but the menu only lists
 these APIs for Legacy GL.
@@ -75,3 +75,29 @@ Exceptions that need a restart:
 
 See [Small fixes](Small-Fixes.md#window-focus): focus is polled every frame instead of relying on window
 events, because a live switch hides one window and creates another.
+
+## Embedded ANGLE and Mesa
+
+Files: `src/hardware/rr_gfxpack.cpp`, `src/hardware/rr_gfxapi.cpp`, `src/hardware/CMakeLists.txt`, `CMakeLists.txt`
+
+**Why:** players should only need one file. Before, DirectX 11, Vulkan and DirectX 12 needed `angle/` and `mesa/`
+folders next to the executable, and the official game's DLLs (`SDL2.dll`, `libcurl-4.dll`...) have the same names
+as the ones Ring Racers E was built with, so copying them could replace the official ones.
+
+How the release executable is built:
+
+1. `-DRRE_STATIC_DEPS=ON` (MinGW) links SDL2, curl, libpng, zlib and Opus statically, with the extra libraries that
+   `pkg-config --static` lists. The executable only needs Windows DLLs.
+2. If `RRE_EMBED_DIR/angle/` and `RRE_EMBED_DIR/mesa/` have the DLLs, CMake gzips each one at configure time
+   (`file(ARCHIVE_CREATE ... FORMAT raw COMPRESSION GZip)`) and generates `rre_pack.inc`, which includes them in the
+   executable with `.incbin` (the same way as `d3dcompiler_47.dll`, see
+   [Windows 7 and the 32-bit build](Windows-7-and-32-bit.md)). About 34 MB compressed.
+3. When DirectX 11, Vulkan or DirectX 12 is started, `RRPack_Extract` inflates that group's DLLs with zlib to
+   `%LOCALAPPDATA%\RingRacersE\<group>-<id>\` (only the missing ones; each file is written as `.tmp` and renamed, so a
+   half-written DLL is never used). `<id>` comes from the CRC32 of the files, so a new version uses a new folder and
+   never fights a copy that another running game has loaded.
+4. Detection (`RRGfx_AngleAvailable`, `RRGfx_MesaAvailable`) only checks that the files are embedded: nothing is
+   written until the API is actually used.
+
+An `angle/` or `mesa/` folder next to the executable still wins over the embedded copy (useful to try another ANGLE
+or Mesa version).

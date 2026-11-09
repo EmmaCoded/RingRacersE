@@ -10,6 +10,8 @@ For a short feature list and build instructions, see the [README](../README.md).
 
 ## Pages
 
+- [Installing](Installing.md): Windows and Linux, game data, minimum requirements.
+
 Graphics:
 - [Graphics APIs and live switching](Graphics-APIs.md): how renderers are detected, chosen and switched without a restart.
 - [Direct3D 9 backend](Direct3D-9-Backend.md): a new RHI backend for the Software renderer.
@@ -35,6 +37,7 @@ Other:
 | File | What it does |
 |---|---|
 | `src/hardware/rr_gfxapi.cpp/.h` | Graphics API detection, Mesa and ANGLE setup |
+| `src/hardware/rr_gfxpack.cpp/.h` | ANGLE and Mesa DLLs embedded in the executable |
 | `src/sdl/i_video.cpp` | Window creation, live API switching, focus handling |
 | `src/rhi/d3d9/` | Direct3D 9 / 9Ex RHI backend and its HLSL shaders |
 | `src/hardware/r_opengl/r_gles.inl` | Old OpenGL features emulated on OpenGL ES 3 (ANGLE) |

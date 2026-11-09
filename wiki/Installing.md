@@ -49,7 +49,7 @@ system: glibc, the video drivers (OpenGL), X11/Wayland, ALSA/PulseAudio and libs
 | `install.sh` | Installs or updates Ring Racers E for your user (menu and desktop icons) |
 | `uninstall.sh` | Removes Ring Racers E (your settings and replays are kept) |
 | `RingRacersE.sh` | Starts the game (also works without installing) |
-| `OpenFolder.sh` | Opens `~/.ringracers`: mods (`addons`), logs and settings. Also in the menu as "Ring Racers E - Folder (mods and logs)" |
+| `OpenGameFolder.sh` | Opens `~/.ringracers`: mods (`addons`), logs and settings. Also in the menu as "Ring Racers E - Folder (mods and logs)" |
 
 Settings, replays, mods and logs are in `~/.ringracers` (a hidden folder: Ctrl+H in the file manager). The
 official Flatpak keeps its own settings in `~/.var/app/org.kartkrew.RingRacers/.ringracers`.

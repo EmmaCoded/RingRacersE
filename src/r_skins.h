@@ -70,8 +70,12 @@ struct skin_t
 
 	// contains super versions too
 	spritedef_t sprites[NUMPLAYERSPRITES*2];
-	spriteinfo_t sprinfo[NUMPLAYERSPRITES*2];
+	// sparse: NULL = shared empty info (saves ~100 KB per skin)
+	spriteinfo_t *sprinfo[NUMPLAYERSPRITES*2];
 };
+
+extern spriteinfo_t R_EmptySprInfo;
+#define R_SkinSprInfo(sk, n) ((sk)->sprinfo[n] ? (sk)->sprinfo[n] : &R_EmptySprInfo)
 
 enum facepatches {
 	FACE_RANK = 0,

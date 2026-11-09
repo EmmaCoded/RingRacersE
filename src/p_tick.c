@@ -13,6 +13,7 @@
 /// \brief Archiving: SaveGame I/O, Thinker, Ticker
 
 #include "d_think.h"
+#include "rr_config.h"  // test options in a single file
 #include "doomstat.h"
 #include "d_main.h"
 #include "g_game.h"
@@ -561,13 +562,41 @@ mobj_t *P_SetTarget2(mobj_t **mop, mobj_t *targ
 // Rewritten to delete nodes implicitly, by making currentthinker
 // external and using P_RemoveThinkerDelayed() implicitly.
 //
+
 static void P_RunThinkers(void)
 {
 	size_t i;
 
+#ifdef RR_LOWEND_CODE
+	{
+		static int loaded = 0;
+		if (!loaded) { loaded = 1; rre_ringSleepOn = RRCfg_Int("ring_sleep", 1); { extern int rre_flingNoCol; rre_flingNoCol = RRCfg_Int("fling_nocollide", 1); } }
+	}
+#endif
 	for (i = 0; i < NUM_ACTIVETHINKERLISTS; i++)
 	{
 		ps_thlist_times[i] = I_GetPreciseTime();
+#ifdef RR_LOWEND_CODE
+		if (i == THINK_MOBJ && RR_LOWEND) // low-end mode only
+		{
+			// Sleeping rings (data only): skipped without calling the thinker.
+			// 1 in 8 tics (staggered) they are still checked, to be safe.
+			for (currentthinker = thlist[i].next; currentthinker != &thlist[i]; currentthinker = currentthinker->next)
+			{
+				if (currentthinker->rre_sleep
+					&& currentthinker->function.acp1 == (actionf_p1)P_MobjThinker
+					&& ((leveltime + (UINT32)((uintptr_t)currentthinker >> 6)) & 7))
+				{
+					rre_ringSlept++;
+					RRE_RingSyncFrame((mobj_t *)currentthinker); // Software does not do it at draw time
+					continue;
+				}
+				currentthinker->function.acp1(currentthinker);
+			}
+			ps_thlist_times[i] = I_GetPreciseTime() - ps_thlist_times[i];
+			continue;
+		}
+#endif
 		for (currentthinker = thlist[i].next; currentthinker != &thlist[i]; currentthinker = currentthinker->next)
 		{
 #ifdef PARANOIA
@@ -712,9 +741,12 @@ static void P_StartLevelMusic(void)
 	}
 }
 
+
 //
 // P_Ticker
 //
+#define RR_SEG(k) ((void)0)
+
 void P_Ticker(boolean run)
 {
 	quake_t *quake = NULL;
@@ -791,7 +823,9 @@ void P_Ticker(boolean run)
 
 		ps_playerthink_time = I_GetPreciseTime();
 
+		RR_SEG(0);
 		K_UpdateAllPlayerPositions();
+		RR_SEG(1);
 
 		// OK! Now that we got all of that sorted, players can think!
 		for (i = 0; i < MAXPLAYERS; i++)
@@ -803,6 +837,7 @@ void P_Ticker(boolean run)
 		}
 
 		ps_playerthink_time = I_GetPreciseTime() - ps_playerthink_time;
+		RR_SEG(2);
 
 		if (gamedata && gamestate == GS_LEVEL && !demo.playback)
 		{
@@ -929,6 +964,7 @@ void P_Ticker(boolean run)
 
 	if (run)
 	{
+		RR_SEG(2);
 		ps_thinkertime = I_GetPreciseTime();
 		P_RunThinkers();
 		ps_thinkertime = I_GetPreciseTime() - ps_thinkertime;
@@ -1059,15 +1095,20 @@ void P_Ticker(boolean run)
 
 	if (run)
 		UpdateChallenges();
+	RR_SEG(4);
 
 	// Run shield positioning
 	P_RunOverlays();
+	RR_SEG(5);
 
 	P_UpdateSpecials();
+	RR_SEG(6);
 	P_RespawnSpecials();
+	RR_SEG(7);
 
 	// Lightning, rain sounds, etc.
 	P_PrecipitationEffects();
+	RR_SEG(8);
 
 	if (run)
 	{

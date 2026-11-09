@@ -79,6 +79,10 @@ EXPORT void HWRAPI(UnSetShader) (void);
 EXPORT void HWRAPI(SetShaderInfo) (hwdshaderinfo_t info, INT32 value);
 EXPORT void HWRAPI(LoadCustomShader) (int number, char *code, size_t size, boolean isfragment);
 
+// Low-End mode: draws the static geometry cache (pool of 24-byte SVerts: x,y,z,s,t,rgba;
+// alpha = light level). version changes when the pool changes (re-upload). useShader = lighting on the GPU.
+EXPORT void HWRAPI(DrawStaticPool) (const void *verts, INT32 numVerts, UINT32 version, const UINT16 *idx, INT32 numIdx, FBITFIELD PolyFlags, boolean useShader);
+
 // ==========================================================================
 //                                      HWR DRIVER OBJECT, FOR CLIENT PROGRAM
 // ==========================================================================
@@ -128,6 +132,7 @@ struct hwdriver_s
 	SetShaderInfo       pfnSetShaderInfo;
 	LoadCustomShader    pfnLoadCustomShader;
 	ResetRenderState    pfnResetRenderState;
+	DrawStaticPool      pfnDrawStaticPool; // OpenGL only; NULL = not available
 };
 
 extern struct hwdriver_s hwdriver;

@@ -89,6 +89,7 @@ typedef struct gl_vissprite_s
 	boolean precip; // Tails 08-25-2002
 	boolean bbox;
 	boolean rotated;
+	float rr_roll, rr_px, rr_pz, rr_py; // sprite roll done on the GPU (no rotsprite)
 	UINT8 translucency;       //alpha level 0-255
 
 	angle_t angle; // for splats

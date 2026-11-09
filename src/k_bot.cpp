@@ -45,6 +45,7 @@
 #include "discord.h" // DRPC_UpdatePresence
 #endif
 #include "i_net.h" // doomcom
+#include "rr_config.h" // bot_ai_mask; RR_LOWEND
 
 extern "C" consvar_t cv_forcebots;
 
@@ -2092,6 +2093,25 @@ void K_BuildBotTiccmd(
 		return;
 	}
 
+#ifdef RR_LOWEND_CODE
+	// The bot AI (including one A* per bot and tic) runs 1 in 2 tics, staggered by
+	// player. On the in-between tic it repeats the last input but WITHOUT one-shot buttons
+	// (item, etc.): only steering, accelerate, brake and drift. rr_config: bot_ai_mask=0 turns it off.
+	static ticcmd_t s_lastBotCmd[MAXPLAYERS];
+	static int rrAiMask = -1;
+	if (rrAiMask < 0) rrAiMask = RRCfg_Int("bot_ai_mask", 1);
+	const size_t rrIdx = static_cast<size_t>(player - players);
+	const bool rrReuse = RR_LOWEND && rrAiMask > 0 && player->botvars.style != BOT_STYLE_STAY && rrIdx < MAXPLAYERS
+		&& ((leveltime + rrIdx) & static_cast<tic_t>(rrAiMask)) != 0 && leveltime > starttime + 2;
+	if (rrReuse)
+	{
+		*cmd = s_lastBotCmd[rrIdx];
+		cmd->buttons &= (BT_ACCELERATE | BT_BRAKE | BT_DRIFT);
+		cmd->flags |= TICCMD_BOT;
+		return;
+	}
+#endif
+
 	switch (player->botvars.style)
 	{
 		case BOT_STYLE_STAY:
@@ -2102,6 +2122,10 @@ void K_BuildBotTiccmd(
 		default:
 		{
 			K_BuildBotTiccmdNormal(player, cmd);
+#ifdef RR_LOWEND_CODE
+			if (rrIdx < MAXPLAYERS)
+				s_lastBotCmd[rrIdx] = *cmd;
+#endif
 			break;
 		}
 	}

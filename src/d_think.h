@@ -63,6 +63,8 @@ struct thinker_t
 	INT32 references;
 	INT32 alloctype;
 	size_t size;
+	// idle "sleeping" ring mobj: P_RunThinkers skips it (see RRE_RingWake, p_mobj.c)
+	UINT8 rre_sleep;
 
 #ifdef PARANOIA
 	INT32 debug_mobjtype;

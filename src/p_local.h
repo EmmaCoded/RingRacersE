@@ -272,6 +272,10 @@ void P_RemoveMobj(mobj_t *th);
 void P_RemoveSavegameMobj(mobj_t *th);
 boolean P_SetPlayerMobjState(mobj_t *mobj, statenum_t state);
 boolean P_SetMobjState(mobj_t *mobj, statenum_t state);
+void RRE_RingWake(mobj_t *mobj);      // sleeping ring
+void RRE_RingSyncFrame(mobj_t *mobj);
+extern UINT32 rre_ringSlept;
+extern int rre_ringSleepOn;
 
 void P_RunOverlays(void);
 #define OV_DONTSCREENOFFSET	1

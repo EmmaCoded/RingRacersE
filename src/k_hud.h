@@ -122,6 +122,7 @@ extern patch_t *gen_button_lt[2][2];
 extern patch_t *gen_button_rt[2][2];
 extern patch_t *gen_button_start[2][2];
 extern patch_t *gen_button_back[2][2];
+extern patch_t *gen_button_touch[2][2];
 extern patch_t *gen_button_ls[2][2];
 extern patch_t *gen_button_rs[2][2];
 extern patch_t *gen_button_dpad[2][2];

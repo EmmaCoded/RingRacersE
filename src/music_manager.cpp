@@ -165,6 +165,7 @@ void TuneManager::pause_unpause() const
 	}
 }
 
+
 bool TuneManager::load() const
 {
 	srb2::String lumpstring = srb2::format("O_{}", current_song_);

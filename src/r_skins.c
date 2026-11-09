@@ -44,6 +44,8 @@
 INT32 numskins = 0;
 skin_t **skins;
 
+spriteinfo_t R_EmptySprInfo; // shared empty info (skin->sprinfo[n]==NULL)
+
 unloaded_skin_t *unloadedskins = NULL;
 
 // FIXTHIS: don't work because it must be inistilised before the config load
@@ -237,6 +239,7 @@ boolean R_SkinUsable(INT32 playernum, INT32 skinnum, boolean demoskins)
 		// Simplifies things elsewhere, since there's already plenty of checks for less-than-0...
 		return true;
 	}
+
 
 	if (K_CanChangeRules(true) && (cv_forceskin.value == skinnum))
 	{

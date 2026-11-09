@@ -2786,7 +2786,7 @@ static void Command_MusicDef_f(void)
 void GameSounds_OnChange(void);
 void GameSounds_OnChange(void)
 {
-	if (M_CheckParm("-nosound") || M_CheckParm("-noaudio"))
+	if (M_CheckParm("-nosound") || M_CheckParm("-noaudio") || M_CheckParm("-testwindow"))
 		return;
 
 	if (cv_gamesounds.value != sound_disabled)
@@ -2809,7 +2809,7 @@ void GameSounds_OnChange(void)
 void GameDigiMusic_OnChange(void);
 void GameDigiMusic_OnChange(void)
 {
-	if (M_CheckParm("-nomusic") || M_CheckParm("-noaudio"))
+	if (M_CheckParm("-nomusic") || M_CheckParm("-noaudio") || M_CheckParm("-testwindow"))
 		return;
 	else if (M_CheckParm("-nodigmusic"))
 		return;
@@ -2835,7 +2835,7 @@ void VoiceSelfDeafen_OnChange(void);
 void weaponPrefChange(INT32 ssplayer);
 void VoiceSelfDeafen_OnChange(void)
 {
-	if (M_CheckParm("-novoice") || M_CheckParm("-noaudio"))
+	if (M_CheckParm("-novoice") || M_CheckParm("-noaudio") || M_CheckParm("-testwindow"))
 		return;
 
 	g_voice_disabled = cv_voice_selfdeafen.value;

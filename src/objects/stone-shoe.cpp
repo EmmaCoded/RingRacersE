@@ -282,8 +282,8 @@ private:
 
 		Fixed fd = std::max<Fixed>(followDistance() - shoeSpriteRadius - follow()->radius - chainSpriteRadius * 2, 0);
 		Fixed fdz = follow()->z - z;
-		Fixed nd = fd / std::max(chainLength(), 1);
-		Fixed ndz = fdz / std::max(chainLength(), 1);
+		Fixed nd = fd / std::max<INT32>(chainLength(), 1);
+		Fixed ndz = fdz / std::max<INT32>(chainLength(), 1);
 
 		Vec2<Fixed> v = followVector();
 		Vec2<Fixed> p = pos2d() + v * nd / 2 + v * Fixed {shoeSpriteRadius + chainSpriteRadius};

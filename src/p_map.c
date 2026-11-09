@@ -538,6 +538,15 @@ static BlockItReturn_t PIT_CheckThing(mobj_t *thing)
 	if (thing == g_tm.thing)
 		return BMIT_CONTINUE;
 
+	// Distance rejection BEFORE the other checks (all the ones below, up to
+	// the distance one, only reject, with no side effects; the MF_PAPERCOLLISION ones are
+	// stricter than this one). Same result, without 5-6 calls per far-away object.
+	{
+		const fixed_t bd = thing->radius + g_tm.thing->radius;
+		if (abs(thing->x - g_tm.x) >= bd || abs(thing->y - g_tm.y) >= bd)
+			return BMIT_CONTINUE;
+	}
+
 	// Ignore spectators
 	if ((g_tm.thing->player && g_tm.thing->player->spectator)
 	|| (thing->player && thing->player->spectator))

@@ -13,6 +13,7 @@
 /// \brief Handling interactions (i.e., collisions)
 
 #include "doomdef.h"
+#include "rr_config.h" // RR_LOWEND (low-end mode)
 #include "i_system.h"
 #include "am_map.h"
 #include "g_game.h"
@@ -4533,6 +4534,11 @@ void P_FlingBurst
 {
 	mobj_t *mo = P_SpawnMobjFromMobj(player->mo, 0, 0, 0, objType);
 	P_SetTarget(&mo->target, player->mo);
+#ifdef RR_LOWEND_CODE
+	// The debt spike is visual only (nothing collides with it: it is neither solid nor special),
+	// but when moving it checked every nearby object (~1 ms each in 765). fling_nocollide=0 turns this off.
+	{ extern int rre_flingNoCol; if (RR_LOWEND && objType == MT_DEBTSPIKE && rre_flingNoCol) mo->flags |= MF_NOCLIPTHING; }
+#endif
 
 	mo->threshold = 10; // not useful for spikes
 	mo->fuse = objFuse;

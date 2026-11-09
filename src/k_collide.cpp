@@ -601,7 +601,7 @@ boolean K_DropTargetCollide(mobj_t *t1, mobj_t *t2)
 	{
 		fixed_t speeddampen = FixedDiv(t2->player->speed, 2*K_GetKartSpeed(t2->player, false, false));
 		bumppower = Easing_InQuad(
-			std::min(speeddampen, FRACUNIT),
+			std::min<fixed_t>(speeddampen, FRACUNIT),
 			FRACUNIT,
 			3*FRACUNIT/4
 		);
@@ -1000,7 +1000,7 @@ boolean K_InstaWhipCollide(mobj_t *shield, mobj_t *victim)
 				P_DamageMobj(attacker, attacker, victim, 1, DMG_TUMBLE);
 
 				// A little extra juice, so successful reads are usually positive or zero on spheres.
-				victimPlayer->spheres = std::min(victimPlayer->spheres + 10, 40);
+				victimPlayer->spheres = std::min<INT32>(victimPlayer->spheres + 10, 40);
 
 				shield->renderflags &= ~RF_DONTDRAW;
 				shield->flags |= MF_NOCLIPTHING;
@@ -1394,7 +1394,7 @@ void K_PuntHazard(mobj_t *t1, mobj_t *t2)
 	{
 		fixed_t x_, y_, z_;
 		fixed_t h_ = FixedHypot(x_, y_);
-		fixed_t speed_ = std::max(60 * mapobjectscale, FixedHypot(h_, z_) * 2);
+		fixed_t speed_ = std::max<fixed_t>(60 * mapobjectscale, FixedHypot(h_, z_) * 2);
 
 		explicit Vector(fixed_t x, fixed_t y, fixed_t z) : x_(x), y_(y), z_(z) {}
 		explicit Vector(const mobj_t* mo) :

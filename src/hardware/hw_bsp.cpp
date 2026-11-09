@@ -602,10 +602,7 @@ static void loading_status(void)
 	V_DrawString(x-50, y, V_YELLOWMAP, "Loading...");
 	V_DrawRightAlignedString(x+50, y, V_YELLOWMAP, s);
 
-	// Is this really necessary at this point..?
-	V_DrawCenteredString(BASEVIDWIDTH/2, 40, V_YELLOWMAP, "LEGACY GL IS INCOMPLETE AND MANY");
-	V_DrawCenteredString(BASEVIDWIDTH/2, 50, V_YELLOWMAP, "VISUAL FEATURES ARE MISSING/BROKEN.");
-	V_DrawCenteredString(BASEVIDWIDTH/2, 70, V_YELLOWMAP, "USE AT ROBOTNIK'S RISK.");
+	// Ring Racers E: no yellow "LEGACY GL IS INCOMPLETE..." warning (this edition works on Legacy GL).
 
 	I_UpdateNoVsync();
 }

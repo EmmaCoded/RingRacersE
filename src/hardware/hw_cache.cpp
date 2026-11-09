@@ -30,6 +30,11 @@
 #include "../r_patch.h"
 #include "../r_picformats.h"
 #include "../p_setup.h"
+#include "../p_mobj.h" // [CMAP]
+#include "../r_skins.h" // [CMAP]
+#include "../i_system.h" // [REGEN]
+#include "../r_sky.h" // [REGEN]
+#include "../rr_config.h" // [UPLOAD]
 
 INT32 patchformat = GL_TEXFMT_AP_88; // use alpha for holes
 INT32 textureformat = GL_TEXFMT_P_8; // use chromakey for hole
@@ -415,7 +420,7 @@ static void HWR_DrawTexturePatchInCache(GLMipmap_t *mipmap,
 	}
 }
 
-static UINT8 *MakeBlock(GLMipmap_t *grMipmap)
+__attribute__((noinline)) static UINT8 *MakeBlock(GLMipmap_t *grMipmap)
 {
 	UINT8 *block;
 	INT32 bpp, i;
@@ -439,6 +444,7 @@ static UINT8 *MakeBlock(GLMipmap_t *grMipmap)
 
 	return block;
 }
+
 
 //
 // Create a composite texture from patches, adapt the texture size to a power of 2
@@ -481,7 +487,12 @@ static void HWR_GenerateTexture(GLMapTexture_t *grtex, INT32 texnum, boolean noe
 	if (!noencoremap && encoremap)
 		colormap += COLORMAP_REMAPOFFSET;
 
-	grtex->mipmap.colormap = (GLColormap_t *)Z_Calloc(sizeof(*grtex->mipmap.colormap), PU_HWRPATCHCOLMIPMAP, NULL);
+	// LEAK: when a texture is regenerated after its RAM copy was dropped (HWR_DropRam),
+	// a NEW colormap was requested here without freeing the old one:
+	// +264 B per regeneration (hwrinfo grew 1.5 -> 2.9 MB playing Playground).
+	// Now it is reused; FreeMapTexture frees it on map change.
+	if (!grtex->mipmap.colormap)
+		grtex->mipmap.colormap = (GLColormap_t *)Z_Calloc(sizeof(*grtex->mipmap.colormap), PU_HWRPATCHCOLMIPMAP, NULL);
 	grtex->mipmap.colormap->source = colormap;
 	M_Memcpy(grtex->mipmap.colormap->data, colormap, 256 * sizeof(UINT8));
 
@@ -729,6 +740,10 @@ static void FreeMapTexture(GLMapTexture_t *tex)
 	if (tex->mipmap.data)
 		Z_Free(tex->mipmap.data);
 	tex->mipmap.data = NULL;
+	// the texture's colormap was never freed either (leak on every map change)
+	if (tex->mipmap.colormap)
+		Z_Free(tex->mipmap.colormap);
+	tex->mipmap.colormap = NULL;
 }
 
 void HWR_FreeMapTextures(void)
@@ -782,8 +797,15 @@ void HWR_SetPalette(RGBA_t *palette)
 }
 
 // --------------------------------------------------------------------------
+#define HWR_DropRam(m) Z_ChangeTag((m)->data, PU_HWRCACHE_UNLOCKED)
+
 // Make sure texture is downloaded and set it as the source
 // --------------------------------------------------------------------------
+// Last texture request (to regenerate it from the static cache).
+struct rre_texreq_t { int kind; INT32 a, b; void *p; };
+rre_texreq_t rre_texreq = { 0, 0, 0, NULL };
+GLMapTexture_t *rre_lastgrtex = NULL;
+#define RRE_REQ(k,aa,bb,pp) do { rre_texreq.kind = (k); rre_texreq.a = (aa); rre_texreq.b = (bb); rre_texreq.p = (pp); } while (0)
 GLMapTexture_t *HWR_GetTexture(INT32 tex, INT32 basetex)
 {
 	GLMapTexture_t *grtex;
@@ -798,15 +820,19 @@ GLMapTexture_t *HWR_GetTexture(INT32 tex, INT32 basetex)
 
 	// Generate texture if missing from the cache
 	if (!grtex->mipmap.data && !grtex->mipmap.downloaded)
+	{
 		HWR_GenerateTexture(grtex, tex, !R_TextureCanRemap(basetex));
+	}
 
 	// If hardware does not have the texture, then call pfnSetTexture to upload it
 	if (!grtex->mipmap.downloaded)
+	{
 		HWD.pfnSetTexture(&grtex->mipmap);
+	}
 	HWR_SetCurrentTexture(&grtex->mipmap);
 
 	// The system-memory data can be purged now.
-	Z_ChangeTag(grtex->mipmap.data, PU_HWRCACHE_UNLOCKED);
+	HWR_DropRam(&grtex->mipmap);
 
 	if (R_GetTextureBrightmap(tex))
 	{
@@ -828,9 +854,11 @@ GLMapTexture_t *HWR_GetTexture(INT32 tex, INT32 basetex)
 		HWR_SetCurrentTexture(&grtexbright->mipmap);
 
 		// The system-memory data can be purged now.
-		Z_ChangeTag(grtexbright->mipmap.data, PU_HWRCACHE_UNLOCKED);
+		HWR_DropRam(&grtexbright->mipmap);
 	}
 
+	RRE_REQ(1, tex, basetex, NULL);
+	rre_lastgrtex = grtex; // texture scale for scrolling walls
 	return grtex;
 }
 
@@ -918,6 +946,7 @@ static void HWR_CacheTextureAsFlat(GLMipmap_t *grMipmap, INT32 texturenum, boole
 // Download a Doom 'flat' to the hardware cache and make it ready for use
 void HWR_GetRawFlat(lumpnum_t flatlumpnum, boolean noencoremap)
 {
+	RRE_REQ(3, (INT32)flatlumpnum, noencoremap, NULL);
 	GLMipmap_t *grmip;
 	patch_t *patch;
 
@@ -925,6 +954,16 @@ void HWR_GetRawFlat(lumpnum_t flatlumpnum, boolean noencoremap)
 
 	if (flatlumpnum == LUMPERROR)
 		return;
+
+	// A broken lumpnum (wad 99) once arrived here (765, last lap)
+	// -> wadfiles[99] NULL. Skip it instead of crashing.
+	if (WADFILENUM(flatlumpnum) >= numwadfiles || !wadfiles[WADFILENUM(flatlumpnum)]
+		|| LUMPNUM(flatlumpnum) >= wadfiles[WADFILENUM(flatlumpnum)]->numlumps)
+	{
+		static int warned = 0;
+		if (warned < 5) { warned++; RR_DIAGPRINT("[BADFLAT] lumpnum=%08x invalid, skipped\n", (unsigned)flatlumpnum); }
+		return;
+	}
 
 	patch = HWR_GetCachedGLPatch(flatlumpnum);
 	grmip = ((GLPatch_t *)Patch_AllocateHardwarePatch(patch))->mipmap;
@@ -989,7 +1028,7 @@ void HWR_GetLevelFlat(levelflat_t *levelflat, boolean noencoremap)
 		HWR_SetCurrentTexture(&grtex->mipmap);
 
 		// The system-memory data can be purged now.
-		Z_ChangeTag(grtex->mipmap.data, PU_HWRCACHE_UNLOCKED);
+		HWR_DropRam(&grtex->mipmap);
 
 		if ((texturenum = R_GetTextureBrightmap(texturenum)))
 		{
@@ -1008,7 +1047,7 @@ void HWR_GetLevelFlat(levelflat_t *levelflat, boolean noencoremap)
 			HWR_SetCurrentTexture(&grtex->mipmap);
 
 			// The system-memory data can be purged now.
-			Z_ChangeTag(grtex->mipmap.data, PU_HWRCACHE_UNLOCKED);
+			HWR_DropRam(&grtex->mipmap);
 		}
 	}
 	else if (levelflat->type == LEVELFLAT_PATCH)
@@ -1067,6 +1106,8 @@ void HWR_GetLevelFlat(levelflat_t *levelflat, boolean noencoremap)
 #endif
 	else // set no texture
 		HWR_SetCurrentTexture(NULL);
+	// a = current frame of the animated flat (the static cache changes it at draw time)
+	RRE_REQ(2, levelflat->type == LEVELFLAT_TEXTURE ? levelflat->u.texture.num : (INT32)levelflat->u.flat.lumpnum, noencoremap, levelflat);
 }
 
 // --------------------+
@@ -1120,6 +1161,20 @@ void HWR_GetPatch(patch_t *patch)
 // -------------------+
 // HWR_GetMappedPatch : Same as HWR_GetPatch for sprite color
 // -------------------+
+mobj_t *rre_sprmobj = NULL; // who requests the colormapped sprite
+static void rre_cmaplog(const UINT8 *colormap, patch_t *patch, int kind)
+{
+	static const UINT8 *seen[48]; static int nseen = 0; static int nlog = 0;
+	for (int i = 0; i < nseen; i++) if (seen[i] == colormap) return;
+	if (nseen < 48) seen[nseen++] = colormap;
+	if (nlog++ >= 48) return;
+	mobj_t *m = rre_sprmobj;
+	RR_DIAGPRINT("[CMAP] k%d src=%p cmaps=%p remap=%d %dx%d mobj=%s type=%d spr=%d frame=%x color=%d colorized=%d skin=%d\n",
+		kind, (const void *)colormap, (void *)colormaps, colormap == colormaps + COLORMAP_REMAPOFFSET,
+		patch->width, patch->height, m ? "yes" : "no", m ? (int)m->type : -1, m ? (int)m->sprite : -1,
+		m ? (unsigned)m->frame : 0u, m ? (int)m->color : -1, m ? (int)m->colorized : -1,
+		(m && m->skin) ? (int)((skin_t *)m->skin)->skinnum : -1);
+}
 void HWR_GetMappedPatch(patch_t *patch, const UINT8 *colormap)
 {
 	GLPatch_t *grPatch;
@@ -1146,6 +1201,7 @@ void HWR_GetMappedPatch(patch_t *patch, const UINT8 *colormap)
 		{
 			if (memcmp(grMipmap->colormap->data, colormap, 256 * sizeof(UINT8)))
 			{
+				rre_cmaplog(colormap, patch, 2);
 				M_Memcpy(grMipmap->colormap->data, colormap, 256 * sizeof(UINT8));
 				HWR_UpdatePatchMipmap(patch, grMipmap);
 			}
@@ -1154,6 +1210,7 @@ void HWR_GetMappedPatch(patch_t *patch, const UINT8 *colormap)
 			return;
 		}
 	}
+	rre_cmaplog(colormap, patch, 1);
 	// not found, create it!
 	// If we are here, the sprite with the current colormap is not already in hardware memory
 
@@ -1172,6 +1229,7 @@ void HWR_GetMappedPatch(patch_t *patch, const UINT8 *colormap)
 
 	HWR_LoadPatchMipmap(patch, newMipmap);
 }
+
 
 void HWR_UnlockCachedPatch(GLPatch_t *gpatch)
 {

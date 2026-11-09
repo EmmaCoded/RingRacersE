@@ -27,6 +27,7 @@
 ///        simpler (about half the lines of code).
 
 #include <stddef.h>
+#include <string.h>
 #include <stdalign.h>
 
 #include <tracy/tracy/TracyC.h>
@@ -122,6 +123,7 @@ void Z_Init(void)
 // Zone memory allocation
 // ----------------------
 
+
 /** Frees allocated memory.
   *
   * \param ptr A pointer to allocated memory,
@@ -176,7 +178,7 @@ void Z_Free2(void *ptr, const char *file, INT32 line)
   * \param size Amount of memory to be allocated, in bytes.
   * \return A pointer to the allocated memory.
   */
-static void *xm(size_t size)
+static void *xm(size_t size, const char *file, INT32 line)
 {
 	const size_t padedsize = size+sizeof (size_t);
 	void *p;
@@ -193,7 +195,10 @@ static void *xm(size_t size)
 
 		if (p == NULL)
 		{
-			I_Error("Out of memory allocating %s bytes", sizeu1(size));
+			// Includes the caller's file/line (already available through
+			// the Z_Malloc/Z_MallocAlign macros) to locate the exact call site
+			// that runs out of memory.
+			I_Error("Out of memory allocating %s bytes (%s:%d)", sizeu1(size), file, line);
 		}
 	}
 
@@ -224,7 +229,7 @@ void *Z_Malloc2(size_t size, INT32 tag, void *user, INT32 alignbits,
 	CONS_Debug(DBG_MEMORY, "Z_Malloc %s:%d\n", file, line);
 #endif
 
-	block = (memblock_t*)xm(sizeof (memblock_t) + ALIGNPAD + size);
+	block = (memblock_t*)xm(sizeof (memblock_t) + ALIGNPAD + size, file, line);
 	TracyCAlloc(block, sizeof (memblock_t) + ALIGNPAD + size);
 	ptr = MEMORY(block);
 	I_Assert((intptr_t)ptr % alignof (max_align_t) == 0);
@@ -359,6 +364,7 @@ void *Z_Realloc2(void *ptr, size_t size, INT32 tag, void *user, INT32 alignbits,
   * \param lowtag The lowest tag to consider.
   * \param hightag The highest tag to consider.
   */
+
 void Z_FreeTags(INT32 lowtag, INT32 hightag)
 {
 	memblock_t *block, *next;
@@ -604,6 +610,7 @@ size_t Z_TagsUsage(INT32 lowtag, INT32 hightag)
 
 	return cnt;
 }
+
 
 // -----------------------
 // Miscellaneous functions

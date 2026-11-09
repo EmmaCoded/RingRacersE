@@ -40,6 +40,8 @@ patch_t *Patch_Create(softwarepatch_t *source, size_t srcsize, void *dest)
 		patch->height     = SHORT(source->height);
 		patch->leftoffset = SHORT(source->leftoffset);
 		patch->topoffset  = SHORT(source->topoffset);
+
+
 		patch->columnofs  = static_cast<INT32*>(Z_Calloc(size, PU_PATCH_DATA, NULL));
 
 		for (col = 0; col < patch->width; col++)

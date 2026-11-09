@@ -3662,7 +3662,6 @@ static fixed_t P_SegLength(seg_t *seg)
 	return FixedHypot(dx, dy)<<1;
 }
 
-#ifdef HWRENDER
 /** Computes the length of a seg as a float.
   * This is needed for OpenGL.
   *
@@ -3679,7 +3678,6 @@ static inline float P_SegLengthFloat(seg_t *seg)
 
 	return (float)hypot(dx, dy);
 }
-#endif
 
 /** Updates the light offset
   *
@@ -8516,6 +8514,18 @@ boolean P_LoadLevel(boolean fromnetsave, boolean reloadinggamestate)
 	levelloading = true;
 	g_reloadinggamestate = reloadinggamestate;
 
+	// Ring Racers E: low-end mode is fixed for the whole course. Never while watching replays.
+	// Online the server decides with the rrnetlowend netvar (it reaches everyone the same way, including
+	// players joining mid-course: CV_LoadNetVars runs before P_LoadLevel in P_LoadNetGame).
+	{
+		extern int rr_lowend;
+		if (netgame)
+			rr_lowend = cv_rrnetlowend.value ? 1 : 0;
+		else
+			rr_lowend = (cv_rrlowend.value && !demo.playback) ? 1 : 0;
+		I_OutputMsg("[LOWEND] %s on %s\n", rr_lowend ? "ON" : "off", G_BuildMapName(gamemap));
+	}
+
 	// This is needed. Don't touch.
 	maptol = mapheaderinfo[gamemap-1]->typeoflevel;
 
@@ -9932,4 +9942,5 @@ void ReduceVFX_OnChange(void)
 		return;
 	P_ReduceVFXTextureReload();
 }
+
 

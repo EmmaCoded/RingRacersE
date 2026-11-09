@@ -73,6 +73,7 @@ struct texture_t
 // all loaded and prepared textures from the start of the game
 extern texture_t **textures;
 
+
 extern INT32 *texturewidth;
 extern fixed_t *textureheight; // needed for texture pegging
 

@@ -314,6 +314,7 @@ void RotatedPatch_DoRotation(rotsprite_t *rotsprite, patch_t *patch, INT32 angle
 	UINT16 *rawdst, *rawconv;
 	size_t size;
 	pictureflags_t bflip = (flip) ? PICFLAGS_XFLIP : 0;
+	UINT16 *rre_scratch = NULL; // fixed buffer (never freed); NULL = none
 
 	INT32 width = patch->width;
 	INT32 height = patch->height;
@@ -424,7 +425,8 @@ void RotatedPatch_DoRotation(rotsprite_t *rotsprite, patch_t *patch, INT32 angle
 		ox -= minx;
 		oy -= miny;
 
-		Z_Free(rawdst);
+		if (rawdst != rre_scratch)
+			Z_Free(rawdst);
 	}
 	else
 	{
@@ -438,7 +440,8 @@ void RotatedPatch_DoRotation(rotsprite_t *rotsprite, patch_t *patch, INT32 angle
 
 	Z_ChangeTag(rotated, PU_PATCH_ROTATED);
 	Z_SetUser(rotated, (void **)(&rotsprite->patches[idx]));
-	Z_Free(rawconv);
+	if (rawconv != rre_scratch)
+		Z_Free(rawconv);
 
 	rotated->leftoffset = ox;
 	rotated->topoffset = oy;

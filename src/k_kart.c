@@ -64,6 +64,7 @@
 #include "music.h"
 #include "m_easing.h"
 #include "k_endcam.h"
+#include "rr_config.h" // bot_wp_mask; RR_LOWEND (low-end mode)
 
 // SOME IMPORTANT VARIABLES DEFINED IN DOOMDEF.H:
 // gamespeed is cc (0 for easy, 1 for normal, 2 for hard)
@@ -71,6 +72,18 @@
 // encoremode is Encore Mode (duh), bool
 // comeback is Battle Mode's karma comeback, also bool
 // mapreset is set when enough players fill an empty server
+#ifdef RR_LOWEND_CODE
+// Karts that are NOT the player on screen (bots): no dust/smoke/speed line particles.
+// With 8 racers those effects took ~50 ms of thinker time per tic. Invincibility auras, items and
+// shields are NOT touched. rr_config: bot_effects=1 brings them back.
+static boolean RRE_QuietKart(const player_t *p)
+{
+	static int on = -1;
+	if (on < 0) on = !RRCfg_Int("bot_effects", 0);
+	return RR_LOWEND && on && p && p->bot && !P_IsDisplayPlayer(p);
+}
+#endif
+
 
 UINT8 K_SetPlayerItemAmount(player_t *player, INT32 amount)
 {
@@ -2001,6 +2014,9 @@ void K_MatchGenericExtraFlagsNoZAdjust(mobj_t *mo, mobj_t *master)
 
 void K_SpawnDashDustRelease(player_t *player)
 {
+#ifdef RR_LOWEND_CODE
+	if (RRE_QuietKart(player)) return;
+#endif
 	fixed_t newx;
 	fixed_t newy;
 	mobj_t *dust;
@@ -2187,6 +2203,9 @@ void K_SpawnDriftBoostClipSpark(mobj_t *clip)
 
 static void K_SpawnGenericSpeedLines(player_t *player, boolean top)
 {
+#ifdef RR_LOWEND_CODE
+	if (RRE_QuietKart(player)) return;
+#endif
 	fixed_t rand_x;
 	fixed_t rand_y;
 	fixed_t rand_z;
@@ -6857,7 +6876,11 @@ static void K_SpawnDriftSparks(player_t *player)
 
 	if (player->driftcharge >= dsthree)
 	{
+#ifdef RR_LOWEND_CODE
+		if (RR_LOWEND ? (leveltime % 8 == 0) : (cv_reducevfx.value || leveltime % 2 == 0))
+#else
 		if (cv_reducevfx.value || leveltime % 2 == 0)
+#endif
 		{
 			K_SpawnDriftElectricity(player);
 		}
@@ -6865,6 +6888,9 @@ static void K_SpawnDriftSparks(player_t *player)
 
 	if (leveltime % 2 == 1)
 		return;
+#ifdef RR_LOWEND_CODE
+	if (RR_LOWEND && (leveltime % 8)) return; // low-end: fewer sparks
+#endif
 
 	if (!player->drift
 		|| (player->driftcharge < dsone && !(player->driftcharge < 0)))
@@ -7049,6 +7075,9 @@ void K_SpawnBoostTrail(player_t *player)
 	I_Assert(player != NULL);
 	I_Assert(player->mo != NULL);
 	I_Assert(!P_MobjWasRemoved(player->mo));
+#ifdef RR_LOWEND_CODE
+	if (RR_LOWEND && (leveltime % 4)) return; // low-end: 75% fewer particles
+#endif
 
 	if (!P_IsObjectOnGround(player->mo)
 		|| player->hyudorotimer != 0)
@@ -7111,6 +7140,9 @@ void K_SpawnSparkleTrail(mobj_t *mo)
 
 	I_Assert(mo != NULL);
 	I_Assert(!P_MobjWasRemoved(mo));
+#ifdef RR_LOWEND_CODE
+	if (RR_LOWEND && (leveltime % 3)) return; // low-end: ~67% fewer particles
+#endif
 
 	if (leveltime & 2)
 		index = 1;
@@ -7161,6 +7193,9 @@ void K_SpawnWipeoutTrail(mobj_t *mo)
 
 	I_Assert(mo != NULL);
 	I_Assert(!P_MobjWasRemoved(mo));
+#ifdef RR_LOWEND_CODE
+	if (RR_LOWEND && (leveltime % 3)) return; // low-end: ~67% fewer particles
+#endif
 
 	if (mo->player)
 		aoff = (mo->player->drawangle + ANGLE_180);
@@ -7215,6 +7250,9 @@ void K_SpawnFireworkTrail(mobj_t *mo)
 
 void K_SpawnDraftDust(mobj_t *mo)
 {
+#ifdef RR_LOWEND_CODE
+	if (RRE_QuietKart(mo->player)) return;
+#endif
 	UINT8 i;
 
 	I_Assert(mo != NULL);
@@ -7883,6 +7921,9 @@ static void K_DoLightningShield(player_t *player)
 
 static void K_FlameDashLeftoverSmoke(mobj_t *src)
 {
+#ifdef RR_LOWEND_CODE
+	if (RRE_QuietKart(src->player)) return;
+#endif
 	UINT8 i;
 
 	for (i = 0; i < 2; i++)
@@ -9779,6 +9820,10 @@ static inline BlockItReturn_t PIT_AttractingRings(mobj_t *thing)
 		return BMIT_CONTINUE; // Too far away
 	}
 
+#ifdef RR_LOWEND_CODE
+	RRE_RingWake(thing); // the magnet is going to move it: wake the sleeping ring
+#endif
+
 	if (RINGTOTAL(attractmo->player) >= 20 || !P_CanPickupItem(attractmo->player, PICKUP_RINGORSPHERE))
 	{
 		// Already reached max -- just joustle rings around.
@@ -10055,7 +10100,12 @@ void K_KartPlayerThink(player_t *player, ticcmd_t *cmd)
 					K_SpawnNormalSpeedLines(player);
 			}
 
-			if (player->numboosts > 0) // Boosting after images
+			if (player->numboosts > 0
+#ifdef RR_LOWEND_CODE
+				// bots: even tics only (on odd tics the afterimage spawns invisible)
+				&& !((leveltime & 1) && RRE_QuietKart(player))
+#endif
+				) // Boosting after images
 			{
 				mobj_t *ghost;
 				ghost = P_SpawnGhostMobj(player->mo);
@@ -12423,6 +12473,15 @@ static void K_UpdateDistanceFromFinishLine(player_t *const player)
 			boolean pathfindsuccess = false;
 			path_t pathtofinish = {0};
 
+#ifdef RR_LOWEND_CODE
+			if (RR_LOWEND)
+			{
+				UINT32 cachedtotal = 0; // A* with cache (low-end mode only)
+				pathfindsuccess = K_PathDistToFinishCached(player->nextwaypoint, finishline, &cachedtotal);
+				pathtofinish.totaldist = cachedtotal;
+			}
+			else
+#endif
 			pathfindsuccess =
 				K_PathfindToWaypoint(player->nextwaypoint, finishline, &pathtofinish, useshortcuts, huntbackwards);
 
@@ -13787,6 +13846,16 @@ void K_UpdateAllPlayerPositions(void)
 			player->cheatchecknum = player->lastsafecheatcheck;
 		}
 
+#ifdef RR_LOWEND_CODE
+		// With 8 racers this waypoint search took ~18 ms per tic. Bots
+		// repeat it only 1 in (mask+1) tics, staggered; the human player always.
+		{
+			static int rrMask = -1;
+			if (rrMask < 0) rrMask = RRCfg_Int("bot_wp_mask", 3);
+			if (RR_LOWEND && rrMask > 0 && player->bot && !P_IsDisplayPlayer(player) && ((leveltime + (tic_t)i) & (tic_t)rrMask))
+				continue;
+		}
+#endif
 		K_UpdatePlayerWaypoints(player);
 	}
 
@@ -14158,6 +14227,9 @@ void K_KartEbrakeVisuals(player_t *p)
 
 static void K_KartSpindashDust(mobj_t *parent)
 {
+#ifdef RR_LOWEND_CODE
+	if (RRE_QuietKart(parent->player)) return;
+#endif
 	fixed_t rad = FixedDiv(FixedHypot(parent->radius, parent->radius), parent->scale);
 	INT32 i;
 
@@ -16864,6 +16936,11 @@ void K_CheckSpectateStatus(boolean considermapreset)
 			// This spectator does not want to join.
 			continue;
 		}
+
+		// Ring Racers E: low-end player waiting for the host to switch to low-end (when the round ends).
+		// cv_rrnetlowwait is a netvar -> every machine decides the same way (no desync).
+		if (netgame && (cv_rrnetlowwait.value & (1 << i)))
+			continue;
 
 		if (netgame && numingame > 0 && players[i].spectatorReentry > 0)
 		{

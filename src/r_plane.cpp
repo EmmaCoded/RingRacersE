@@ -715,16 +715,17 @@ static void R_DrawSkyPlane(visplane_t *pl, void(*colfunc)(drawcolumndata_t*), bo
 	}
 	dc.lightmap = colormaps;
 	dc.texturemid = skytexturemid;
-	dc.texheight = textureheight[skytexture]
+	const INT32 skytex = skytexture;
+	dc.texheight = textureheight[skytex]
 		>>FRACBITS;
 	dc.sourcelength = dc.texheight;
 
 	x = pl->minx;
 
 	// Precache the texture so we don't corrupt the zoned heap off-main thread
-	if (!texturecache[texturetranslation[skytexture]])
+	if (!texturecache[texturetranslation[skytex]])
 	{
-		R_GenerateTexture(texturetranslation[skytexture]);
+		R_GenerateTexture(texturetranslation[skytex]);
 	}
 
 	while (x <= pl->maxx)
@@ -750,7 +751,7 @@ static void R_DrawSkyPlane(visplane_t *pl, void(*colfunc)(drawcolumndata_t*), bo
 				dc.iscale = FixedMul(skyscale[viewssnum], FINECOSINE(xtoviewangle[viewssnum][x + i]>>ANGLETOFINESHIFT));
 				dc.x = x + i;
 				dc.source =
-					R_GetColumn(texturetranslation[skytexture],
+					R_GetColumn(texturetranslation[skytex],
 						-angle); // get negative of angle for each column to display sky correct way round! --Monster Iestyn 27/01/18
 				dc.brightmap = NULL;
 

@@ -12,6 +12,7 @@
 /// \brief hardware renderer, using the standard HardWareRender driver DLL for SRB2
 
 #include <algorithm>
+#include "../rr_config.h"  // test options in a single file
 #include <math.h>
 
 #include "../doomstat.h"
@@ -32,6 +33,7 @@
 #include "../r_picformats.h"
 #include "../r_bsp.h"
 #include "../d_clisrv.h"
+#include "../d_netcmd.h" // D_MapChange
 #include "../w_wad.h"
 #include "../z_zone.h"
 #include "../r_splats.h"
@@ -190,10 +192,12 @@ boolean gl_shadersavailable = true;
 // Lighting
 // ==========================================================================
 
+
 static boolean HWR_UseShader(void)
 {
 	return (cv_glshaders.value && gl_shadersavailable);
 }
+extern "C" boolean HWR_UseShaderPC(void) { return HWR_UseShader(); } // used by rr_staticgeo.cpp
 
 boolean HWR_OverrideObjectLightLevel(mobj_t *thing, INT32 *lightlevel)
 {
@@ -227,7 +231,7 @@ void HWR_ObjectLightLevelPost(gl_vissprite_t *spr, const sector_t *sector, INT32
 			);
 
 			// Less change in contrast in dark sectors
-			extralight = FixedMul(extralight, std::min(std::max(0, *lightlevel), 255) * FRACUNIT / 255);
+			extralight = FixedMul(extralight, std::min<INT32>(std::max<INT32>(0, *lightlevel), 255) * FRACUNIT / 255);
 
 			if (papersprite)
 			{
@@ -242,10 +246,14 @@ void HWR_ObjectLightLevelPost(gl_vissprite_t *spr, const sector_t *sector, INT32
 
 				// Less change in contrast at further distances, to counteract DOOM diminished light
 				fixed_t n = FixedDiv(FixedMul(xscale, LIGHTRESOLUTIONFIX), ((MAXLIGHTSCALE-1) << LIGHTSCALESHIFT));
-				extralight = FixedMul(extralight, std::min(n, FRACUNIT));
+				extralight = FixedMul(extralight, std::min<INT32>(n, FRACUNIT));
 
 				// Contrast is stronger for normal sprites, stronger than wall lighting is at the same distance
-				*lightlevel += FixedFloor((extralight * 2) + (FRACUNIT / 2)) / FRACUNIT;
+				// Without shaders, low light (e.g. 200 -> 75) looks almost
+				// black with the fallback formula (same issue the rings had).
+				// Measured in Balconies: Sonic facing away from the light = 75.
+				// Half the contrast: 200 -> ~138, shading still visible but not black.
+				*lightlevel += FixedFloor(extralight + (FRACUNIT / 2)) / FRACUNIT;
 			}
 		}
 
@@ -288,7 +296,8 @@ void HWR_Lighting(FSurfaceInfo *Surface, INT32 light_level, extracolormap_t *col
 		// 8 is too bright for dark levels, and 16 is too dark for bright levels.
 		// 12 is the compromise value. It doesn't look especially good anywhere, but it's the most balanced.
 		// (Also, as far as I can tell, fade_color's alpha is actually not used in Software, so we only use light level.)
-		fade_alpha = (float)(sqrt(255-light_level) * 12) / 255.0f;
+		// (clamp: with light > 255 the square root of a negative gave NaN -> color 0)
+		fade_alpha = (float)(sqrt(std::max<INT32>(0, 255-light_level)) * 12) / 255.0f;
 
 		// Clamp the alpha values
 		tint_alpha = std::min(std::max(tint_alpha, 0.0f), 1.0f);
@@ -308,7 +317,7 @@ void HWR_Lighting(FSurfaceInfo *Surface, INT32 light_level, extracolormap_t *col
 	}
 
 	// Clamp the light level, since it can sometimes go out of the 0-255 range from animations
-	light_level = std::min(std::max(light_level, 0), 255);
+	light_level = std::min<INT32>(std::max<INT32>(light_level, 0), 255);
 
 	Surface->PolyColor.rgba = poly_color.rgba;
 	Surface->TintColor.rgba = tint_color.rgba;
@@ -390,6 +399,760 @@ static FUINT HWR_CalcSlopeLight(FUINT lightnum, pslope_t *slope, const sector_t 
 // -----------------+
 // HWR_RenderPlane  : Render a floor or ceiling convex polygon
 // -----------------+
+// DEBUG mode 7 (g_rre_dbgflat = 7): tints every polygon by where it
+// comes from. red=floor, cyan=ceiling, magenta=FOF floor/ceiling,
+// green=wall, dark green=translucent/FOF wall, blue=sprite,
+// yellow=polyobject, orange=shadow.
+extern "C" int g_rre_dbgflat;
+static inline void dbg_tint(FSurfaceInfo *s, FBITFIELD *f, UINT8 r, UINT8 g, UINT8 b)
+{
+	if (g_rre_dbgflat != 7 || !s) return;
+	s->PolyColor.s.red = r; s->PolyColor.s.green = g; s->PolyColor.s.blue = b;
+	if (f) *f |= PF_Modulated;
+}
+#define DBG_TINT(s,f,r,g,b) dbg_tint(s,f,r,g,b)
+
+// ==========================================================================
+// STATIC GEOMETRY - world cache in GPU-side memory
+// --------------------------------------------------------------------------
+// The first time a subsector floor/ceiling or a wall (seg) is drawn it is
+// "captured": the polygons sent by the normal path are copied into a persistent
+// vertex pool (with lighting baked in as a per-vertex color).
+// On the following frames, if the "signature" (heights, textures, light, offsets...)
+// did not change, all of the HWR work is skipped and only indices are added.
+// At the end of the BSP pass everything is drawn grouped by (texture, flags).
+// Things that change often (>= 4 times) or are translucent stay on the normal path.
+// Disable: "nostatic" test option (rr_config.h).
+// ==========================================================================
+#include <vector>
+#include <string>
+#include <csignal>
+#include <unistd.h> // _exit
+#ifdef _WIN32
+// No windows.h here (it clashes with min/max/boolean): only what is needed from kernel32
+#ifndef _WINDOWS_
+extern "C" __declspec(dllimport) unsigned short __stdcall RtlCaptureStackBackTrace(unsigned long, unsigned long, void **, unsigned long *);
+extern "C" __declspec(dllimport) void *__stdcall GetModuleHandleA(const char *);
+#endif
+#endif
+#include <unordered_map>
+#include <new>
+extern "C" {
+int  RRE_StaticAdd(const FOutVector* v, int n, unsigned int rgba);
+int  RRE_StaticUsed(void);
+void RRE_StaticTruncate(int used);
+int  RRE_StaticReset(void);
+int  RRE_StaticDraw(GLMipmap_t* mip, GLMipmap_t* bright, FBITFIELD flags, const UINT16* idx, int n);
+void RRE_StaticEnd(void);
+void RRE_StaticShiftST(int first, int n, float ds, float dt);
+void RRE_StaticSetYT(int first, int n, const float *y, const float *t);
+void RRE_StaticSetY(int first, int n, float y);
+}
+// Sky-to-texture cache: not implemented by this renderer (stubs).
+static inline int  RRE_SkyTexOn(void) { return 0; }
+static inline int  RRE_SkyTexDrawing(void) { return 0; }
+static inline int  RRE_SkyTexNeedRedraw(void) { return 1; }
+static inline int  RRE_SkyTexBegin(void) { return 0; }
+static inline void RRE_SkyTexEnd(void) {}
+static inline void RRE_SkyTexDraw(void) {}
+static inline void RRE_SkyTexInvalidate(void) {}
+static inline void RRE_SkyTexWhy(int* a, int* b, int* c, float* d, float* e) { *a = *b = *c = 0; *d = *e = 0; }
+static boolean rre_skyQuad = false; // this frame the sky comes from the texture
+static int rre_skyDrawn = 0, rre_skyReused = 0;
+extern GLMapTexture_t *rre_lastgrtex; // hw_cache.cpp
+GLMipmap_t *rre_lastmip = NULL; // set by HWR_SetCurrentTexture (hw_batching.cpp)
+GLMipmap_t *rre_lastbright = NULL; // brightmap of rre_lastmip (or NULL)
+struct rre_texreq_t { int kind; INT32 a, b; void *p; }; // same as in hw_cache.cpp
+extern rre_texreq_t rre_texreq; // hw_cache.cpp
+extern mobj_t *rre_sprmobj; // hw_cache.cpp
+
+static int RRE_ViewNow(void);
+namespace rre_static
+{
+enum { ST_NONE = 0, ST_VALID = 1, ST_NEVER = 2 };
+struct SItem  { UINT32 sig; UINT32 gen; UINT32 firstPoly; UINT16 numPolys; UINT8 state; UINT8 changes; UINT8 why; UINT8 hasOff; fixed_t to, ro;
+	UINT32 sigH; UINT8 kmask; UINT8 patchOk; UINT32 fofMask;
+	UINT16 stable; UINT8 strikes; }; // heights kept apart (simple walls); "never" items are retried if their signature holds still
+struct SPoly  { UINT16 base; UINT8 n; UINT8 pad; UINT16 group; float sx, sy; };
+struct SGroup { GLMipmap_t *mip; FBITFIELD flags; std::vector<UINT16> idx; rre_texreq_t req; GLMipmap_t *bright; };
+
+static std::vector<SItem>  items;     // [numsubsectors*2 (floor/ceiling) + numsegs]
+enum { RRE_MAXPOLYS = 16384, RRE_MAXGROUPS = 512 };
+static std::vector<SPoly>  polys;
+static std::vector<SGroup> groups;
+static std::unordered_map<UINT64, UINT16> groupMap;
+static std::vector<UINT32> secSig, secStamp;
+static UINT32 gen = 1, stamp = 1;
+// Per wall, what was already decided (type + signature). Reused if the FULL signature
+// of its sectors (computed once per sector and pass) and its side/line data did not change.
+// Gives EXACTLY the same sig/sigH/curSimple as recomputing (the full signature covers everything).
+struct SegMemo { UINT32 fSig, bSig, sKey, sig, sigH; UINT32 fs, bs; UINT8 ok, simple; };
+static std::vector<SegMemo> segMemo;
+static int stMemoHit = 0, stMemoMiss = 0;
+static boolean enabled = true, needReset = true;
+static size_t segBase = 0;
+
+static boolean capActive = false, capFail = false, capNever = false;
+static size_t capItem = 0, capPoly0 = 0;
+static int capVert0 = 0;
+
+static int stHits = 0, stCapt = 0, stNever = 0, stResets = 0, stDrawFail = 0, stFrames = 0;
+// Why an item is "never": 1 changes a lot, 2 translucent wall, 3 flags (fog/horizon/no depth), 4 no texture, 5 >255 vertices
+static int stWhyPlane = 0, stWhyWall = 0;
+static int stWhy[6] = {0}; static UINT8 capWhy = 0; static int stAnim = 0;
+
+static inline UINT32 H(UINT32 h, UINT32 v) { h ^= v; return h * 16777619u; }
+static inline UINT32 HP(UINT32 h, const void *p) { return H(h, (UINT32)(uintptr_t)p); }
+
+static UINT32 SlopeSig(UINT32 h, const pslope_t *s)
+{
+	if (!s) return H(h, 0x51u);
+	h = H(h, (UINT32)s->o.z);
+	h = H(h, (UINT32)s->normal.x); h = H(h, (UINT32)s->normal.y); h = H(h, (UINT32)s->normal.z);
+	return h;
+}
+
+static UINT32 FlatSig(UINT32 h, INT32 pic)
+{
+	if (pic < 0 || (size_t)pic >= numlevelflats) return H(h, (UINT32)pic);
+	const levelflat_t *lf = &levelflats[pic];
+	h = H(h, lf->type);
+	// ANIMATED flats (RBTCPR01, RBCSLI02, road edges...): signature uses the BASE frame;
+	// the current frame is picked at draw time (RRE_StaticFrameDraw, kind 2). Before, every
+	// frame change marked the floor and all neighbouring walls as "never".
+	if (lf->speed && lf->type == LEVELFLAT_TEXTURE && lf->u.texture.basenum != -1)
+		h = H(h, (UINT32)lf->u.texture.basenum);
+	else if (lf->speed && lf->type == LEVELFLAT_FLAT && lf->u.flat.baselumpnum != LUMPERROR)
+		h = H(h, (UINT32)lf->u.flat.baselumpnum);
+	else
+		h = H(h, (UINT32)lf->u.texture.num); // (or u.flat.lumpnum: same offset)
+	return h;
+}
+
+// Current offset of the wall being processed (for scrolling walls)
+static boolean curHasOff = false; static fixed_t curTo = 0, curRo = 0;
+static int stShift = 0;
+// Simple wall (2-sided, no slopes/lights/FOFs): heights can be patched in place
+static boolean curSimple = false; static UINT32 curSigH = 0; static UINT8 curKind = 0; static float curPlaneY = 0.0f;
+static int stPatch = 0, stReshape = 0, stRetry = 0; // stRetry = "never" items that go back to the cache
+// [CULPRIT2] named culprits: items that are never cached because they keep changing
+static std::unordered_map<UINT64, UINT32> culp2;
+// Expensive diagnostics (CULPRIT2/3/4, [SUB], [CHG]) only with the "diag" test option.
+// Without it the game (and benchmarks) run clean.
+static int diag = -1;
+static inline boolean Diag(void)
+{
+	if (diag < 0)
+	{
+		diag = 0;
+		diag = RRCfg_On("diag");
+		RR_DIAGPRINT("[DIAG] diagnostics %s\n", diag ? "ON" : "OFF");
+	}
+	return diag != 0;
+}
+} // namespace rre_static (paused)
+extern "C" int RRE_DiagOn(void) { return rre_static::Diag() ? 1 : 0; } // used by p_tick.c
+namespace rre_static {
+static inline boolean IsNeverChg(size_t item) { return item < items.size() && items[item].state == ST_NEVER && items[item].why == 1; }
+static inline void Culp2(UINT32 sec, UINT32 texA, UINT32 kind) { culp2[((UINT64)sec << 32) | ((UINT64)(kind & 0xF) << 28) | (texA & 0x0FFFFFFFu)]++; }
+// [CULPRIT3] "never" floors: which field changes from one frame to the next (bits, see report)
+struct PSnap { INT32 pic, ll, fll; const void *cm; UINT32 fl, slz, sln; fixed_t xo, yo, h; angle_t an; UINT32 sf; const void *sl; UINT32 sig, sigH, view; const void *ecm; UINT8 ok; };
+static std::vector<PSnap> psnap;
+static std::unordered_map<UINT32, std::pair<UINT32, UINT32>> culp3; // sector -> (bits, count)
+// [CULPRIT4] "never" walls: which part of the signature changes. bits 1 front_sector 2 back_sector 4 side 8 line 16 heights
+struct WSnap { UINT32 c[14]; UINT8 ok; }; // 14 parts
+static std::vector<WSnap> wsnap;
+static std::unordered_map<UINT64, std::pair<UINT32, UINT32>> culp4; // (front<<32|back) -> (bits, count)
+static void Culp4(size_t seg, UINT32 fsec, UINT32 bsec, const UINT32 *c)
+{
+	if (wsnap.size() != numsegs) wsnap.assign(numsegs, WSnap{});
+	if (seg >= wsnap.size()) return;
+	WSnap &o = wsnap[seg];
+	if (o.ok)
+	{
+		UINT32 b = 0;
+		for (int i = 0; i < 14; i++) b |= (o.c[i] != c[i]) ? (1u << i) : 0u;
+		auto &e = culp4[((UINT64)fsec << 32) | bsec]; e.first |= b; e.second++;
+	}
+	for (int i = 0; i < 14; i++) o.c[i] = c[i];
+	o.ok = 1;
+}
+static void Culp3(size_t sub, const sector_t *s, INT32 fll, const void *cm, UINT32 fl, fixed_t h, UINT32 sig, UINT32 sigH)
+{
+	if (psnap.size() != numsubsectors) psnap.assign(numsubsectors, PSnap{});
+	if (sub >= psnap.size()) return;
+	PSnap n; n.pic = s->floorpic; n.ll = s->lightlevel; n.fll = fll; n.cm = cm; n.fl = fl;
+	n.sl = s->f_slope; n.slz = s->f_slope ? (UINT32)s->f_slope->o.z : 0; n.sln = s->f_slope ? (UINT32)(s->f_slope->normal.x ^ s->f_slope->normal.y ^ s->f_slope->normal.z) : 0;
+	n.xo = s->floor_xoffs ^ s->floor_yoffs; n.yo = 0; n.an = s->floorpic_angle; n.sf = (UINT32)s->flags; n.h = h; n.ok = 1;
+	n.sig = sig; n.sigH = sigH; n.view = (UINT32)::RRE_ViewNow(); n.ecm = s->extra_colormap;
+	PSnap &o = psnap[sub];
+	if (o.ok)
+	{
+		UINT32 b = 0;
+		b |= (o.pic != n.pic) ? 1u : 0u; b |= (o.ll != n.ll) ? 2u : 0u; b |= (o.fll != n.fll) ? 4u : 0u; b |= (o.cm != n.cm) ? 8u : 0u;
+		b |= (o.fl != n.fl) ? 16u : 0u; b |= (o.slz != n.slz) ? 32u : 0u; b |= (o.sln != n.sln) ? 64u : 0u; b |= (o.xo != n.xo) ? 128u : 0u;
+		b |= (o.an != n.an) ? 256u : 0u; b |= (o.sf != n.sf) ? 512u : 0u; b |= (o.h != n.h) ? 1024u : 0u; b |= (o.sl != n.sl) ? 2048u : 0u;
+		b |= (o.sig != n.sig) ? 4096u : 0u; b |= (o.sigH != n.sigH) ? 8192u : 0u; b |= (o.view != n.view) ? 16384u : 0u; b |= (o.ecm != n.ecm) ? 32768u : 0u;
+		auto &e = culp3[(UINT32)(s - sectors)]; e.first |= b; e.second++;
+	}
+	o = n;
+}
+} // namespace rre_static (paused)
+static boolean RRE_PatchSegHeights(const rre_static::SItem &it);
+static boolean RRE_PatchHeights(size_t item, const rre_static::SItem &it);
+namespace rre_static {
+static UINT32 SideSig(UINT32 h, const side_t *sd, boolean withOffsets = true)
+{
+	if (!sd) return H(h, 0x5Du);
+	if (withOffsets) h = H(h, (UINT32)sd->textureoffset);
+	h = H(h, (UINT32)sd->rowoffset); // vertical: can clip the geometry (midtexture), stays in the signature
+	// BASE texture (without the animation frame): animated walls
+	// stay cached and the current frame is picked at draw time (RRE_StaticFrameDraw).
+	h = H(h, (UINT32)sd->toptexture);
+	h = H(h, (UINT32)sd->midtexture);
+	h = H(h, (UINT32)sd->bottomtexture);
+	h = H(h, (UINT32)sd->repeatcnt);
+	return h;
+}
+
+// mode 0 = base (floors/ceilings), 1 = one-sided wall (lights, no FOFs), 2 = full
+static UINT32 SectorSigRaw(const sector_t *s, int mode = 2)
+{
+	UINT32 h = 2166136261u;
+	// +16 = FLOOR fields only, +32 = CEILING fields only (for planes: a ceiling that
+	// moves or scrolls no longer marks the floor of the same sector as "never", and vice versa)
+	const boolean onlyF = (mode & 16) != 0, onlyC = (mode & 32) != 0;
+	if (!(mode & 4)) { if (!onlyC) h = H(h, (UINT32)s->floorheight); if (!onlyF) h = H(h, (UINT32)s->ceilingheight); }
+	const boolean noFofH = (mode & 8) != 0; // no FOF heights and no light list
+	mode &= 3;
+	if (onlyF || onlyC)
+	{
+		const boolean f = onlyF;
+		h = H(h, (UINT32)(f ? s->floorpic : s->ceilingpic)); h = FlatSig(h, f ? s->floorpic : s->ceilingpic);
+		h = H(h, (UINT32)s->lightlevel);
+		h = H(h, (UINT32)(f ? s->floorlightlevel : s->ceilinglightlevel));
+		h = H(h, (UINT32)(f ? s->floorlightabsolute : s->ceilinglightabsolute));
+		const INT32 ls = f ? s->floorlightsec : s->ceilinglightsec; h = H(h, (UINT32)ls);
+		if (ls >= 0 && (size_t)ls < numsectors) h = H(h, (UINT32)sectors[ls].lightlevel);
+		h = HP(h, s->extra_colormap);
+		h = H(h, (UINT32)(f ? s->floor_xoffs : s->ceiling_xoffs)); h = H(h, (UINT32)(f ? s->floor_yoffs : s->ceiling_yoffs));
+		h = H(h, (UINT32)(f ? s->floorpic_angle : s->ceilingpic_angle));
+		h = H(h, (UINT32)s->flags);
+		h = SlopeSig(h, f ? s->f_slope : s->c_slope);
+		return h;
+	}
+	h = H(h, (UINT32)s->floorpic);    h = H(h, (UINT32)s->ceilingpic);
+	h = FlatSig(h, s->floorpic);      h = FlatSig(h, s->ceilingpic);
+	h = H(h, (UINT32)s->lightlevel);
+	h = H(h, (UINT32)s->floorlightlevel); h = H(h, (UINT32)s->ceilinglightlevel);
+	h = H(h, (UINT32)s->floorlightabsolute | ((UINT32)s->ceilinglightabsolute << 1));
+	h = H(h, (UINT32)s->floorlightsec); h = H(h, (UINT32)s->ceilinglightsec);
+	if (s->floorlightsec >= 0 && (size_t)s->floorlightsec < numsectors) h = H(h, (UINT32)sectors[s->floorlightsec].lightlevel);
+	if (s->ceilinglightsec >= 0 && (size_t)s->ceilinglightsec < numsectors) h = H(h, (UINT32)sectors[s->ceilinglightsec].lightlevel);
+	h = HP(h, s->extra_colormap);
+	h = H(h, (UINT32)s->floor_xoffs); h = H(h, (UINT32)s->floor_yoffs);
+	h = H(h, (UINT32)s->ceiling_xoffs); h = H(h, (UINT32)s->ceiling_yoffs);
+	h = H(h, (UINT32)s->floorpic_angle); h = H(h, (UINT32)s->ceilingpic_angle);
+	h = H(h, (UINT32)s->flags);
+	h = SlopeSig(h, s->f_slope); h = SlopeSig(h, s->c_slope);
+	if (mode == 0) return h; // floors/ceilings: light and colormap are already in their own signature
+	// Only the light bands that change something visible (another light/colormap)
+	// or that clip the wall (CUTSOLIDS/CUTEXTRA). The others split the wall
+	// into identical pieces: moving them changes nothing on screen.
+	{
+		UINT32 pl = 0xFFFFFFFFu; const extracolormap_t *pc = (const extracolormap_t *)(uintptr_t)1;
+		for (INT32 i = 0; !noFofH && i < s->numlights && s->lightlist; i++)
+		{
+			const lightlist_t *l = &s->lightlist[i];
+			const boolean cut = (l->flags & (FOF_CUTSOLIDS|FOF_CUTEXTRA)) != 0;
+			boolean vis = false;
+			if (!(l->flags & FOF_NOSHADE))
+			{
+				const UINT32 ll = l->lightlevel ? (UINT32)*l->lightlevel : 0xFFFFu;
+				const extracolormap_t *lc = l->extra_colormap ? *l->extra_colormap : NULL;
+				if (ll != pl || lc != pc) { vis = true; pl = ll; pc = lc; }
+			}
+			if (!cut && !vis) continue;
+			h = H(h, (UINT32)l->height); h = H(h, (UINT32)l->flags);
+			h = H(h, pl); h = HP(h, pc);
+			h = SlopeSig(h, l->slope);
+			if (cut && l->caster) h = H(h, l->caster->bottomheight ? (UINT32)*l->caster->bottomheight : 0);
+		}
+	}
+	if (mode == 1) return h; // one-sided wall: FOFs do not draw walls here
+	for (const ffloor_t *r = s->ffloors; r; r = r->next)
+	{
+		h = H(h, (UINT32)r->fofflags); h = H(h, (UINT32)r->alpha); h = H(h, (UINT32)r->blend);
+		if (!noFofH)
+		{
+			h = H(h, r->topheight ? (UINT32)*r->topheight : 0);
+			h = H(h, r->bottomheight ? (UINT32)*r->bottomheight : 0);
+		}
+		h = H(h, r->toppic ? (UINT32)*r->toppic : 0);
+		h = H(h, r->bottompic ? (UINT32)*r->bottompic : 0);
+		h = H(h, r->toplightlevel ? (UINT32)*r->toplightlevel : 0);
+		h = SlopeSig(h, r->t_slope ? *r->t_slope : NULL);
+		h = SlopeSig(h, r->b_slope ? *r->b_slope : NULL);
+		if (r->master && r->master->sidenum[0] != 0xffff)
+			h = SideSig(h, &sides[r->master->sidenum[0]]);
+	}
+	return h;
+}
+
+// Signature of a sector, once per render pass.
+static std::vector<UINT32> secSigB, secStampB;
+// Signature without FOFs or light list (for the sector's floors/ceilings).
+[[maybe_unused]] static UINT32 SectorSigBase(const sector_t *s)
+{
+	const size_t i = (size_t)(s - sectors);
+	if (i >= secSigB.size())
+		return SectorSigRaw(s, 0);
+	if (secStampB[i] != stamp) { secStampB[i] = stamp; secSigB[i] = SectorSigRaw(s, 0); }
+	return secSigB[i];
+}
+static std::vector<UINT32> secSigW, secStampW;
+// Signature for one-sided walls (no FOFs)
+static UINT32 SectorSigWall1(const sector_t *s)
+{
+	const size_t i = (size_t)(s - sectors);
+	if (i >= secSigW.size())
+		return SectorSigRaw(s, 1);
+	if (secStampW[i] != stamp) { secStampW[i] = stamp; secSigW[i] = SectorSigRaw(s, 1); }
+	return secSigW[i];
+}
+static std::vector<UINT32> secSigN, secStampN;
+// Full signature WITHOUT floor/ceiling heights (simple walls: heights get patched)
+static UINT32 SectorSigNoH(const sector_t *s)
+{
+	const size_t i = (size_t)(s - sectors);
+	if (i >= secSigN.size())
+		return SectorSigRaw(s, 2 | 4);
+	if (secStampN[i] != stamp) { secStampN[i] = stamp; secSigN[i] = SectorSigRaw(s, 2 | 4); }
+	return secSigN[i];
+}
+static UINT32 SectorSig(const sector_t *s)
+{
+	const size_t i = (size_t)(s - sectors);
+	if (i >= secSig.size())
+		return SectorSigRaw(s);
+	if (secStamp[i] != stamp) { secStamp[i] = stamp; secSig[i] = SectorSigRaw(s); }
+	return secSig[i];
+}
+
+static inline void Emit(const SItem &it)
+{
+	for (UINT32 p = it.firstPoly; p < it.firstPoly + it.numPolys; p++)
+	{
+		const SPoly &sp = polys[p];
+		std::vector<UINT16> &ix = groups[sp.group].idx;
+		for (UINT16 k = 1; k + 1 < sp.n; k++)
+		{
+			ix.push_back(sp.base);
+			ix.push_back((UINT16)(sp.base + k));
+			ix.push_back((UINT16)(sp.base + k + 1));
+		}
+	}
+}
+
+// true = already drawn from the cache (skip the normal path).
+// false = draw normally (capturing it, if applicable).
+static boolean Use(size_t item, UINT32 sig)
+{
+	if (!enabled || item >= items.size() || capActive)
+		return false;
+	SItem &it = items[item];
+	if (it.state == ST_NEVER)
+	{
+		// [CULPRIT3] showed "never" floors whose signature NO LONGER changes (they were marked
+		// when the race started). If the signature holds for 60<<strikes frames in a row, cache it again.
+		if (it.why == 1)
+		{
+			if (it.sig == sig && it.sigH == curSigH)
+			{
+				const UINT32 need = 60u << (it.strikes < 4 ? it.strikes : 4);
+				if (++it.stable >= need)
+				{
+					if (it.strikes < 255) it.strikes++;
+					it.stable = 0; it.changes = 0; stRetry++;
+					goto recapture;
+				}
+			}
+			else { it.sig = sig; it.sigH = curSigH; it.stable = 0; }
+		}
+		stWhy[it.why < 6 ? it.why : 0]++;
+		if (it.why == 1) { if (item < segBase) stWhyPlane++; else stWhyWall++; }
+		return false;
+	}
+	if (it.state == ST_VALID && it.gen == gen)
+	{
+		boolean hOk = true;
+		if (it.sig == sig && it.sigH != curSigH)
+		{
+			hOk = false;
+			// Only floor/ceiling heights changed: patch y/t without recomputing
+			if (it.patchOk && curSimple && RRE_PatchHeights(item, it)) { it.sigH = curSigH; stPatch++; hOk = true; }
+			else if (it.patchOk && curSimple) { stReshape++; goto recapture; } // a piece appears/disappears: recapture without counting a change
+		}
+		if (it.sig == sig && hOk)
+		{
+			if (it.hasOff && curHasOff && (it.to != curTo || it.ro != curRo))
+			{
+				const float dto = (float)(curTo - it.to), dro = (float)(curRo - it.ro);
+				for (UINT32 p = it.firstPoly; p < it.firstPoly + it.numPolys; p++)
+				{
+					const SPoly &sp = polys[p];
+					if (sp.sx != 0.0f || sp.sy != 0.0f)
+						RRE_StaticShiftST(sp.base, sp.n, dto * sp.sx, dro * sp.sy);
+				}
+				it.to = curTo; it.ro = curRo; stShift++;
+			}
+			Emit(it); stHits++; return true;
+		}
+		if (++it.changes >= 4) { it.state = ST_NEVER; it.why = 1; stNever++; return false; }
+	}
+recapture:
+	it.state = ST_NONE;
+	it.sig = sig;
+	it.sigH = curSigH; it.kmask = 0; it.fofMask = 0; it.patchOk = curSimple ? 1 : 0;
+	capActive = true; capFail = false; capNever = false; capWhy = 0;
+	capItem = item; capPoly0 = polys.size(); capVert0 = RRE_StaticUsed();
+	return false;
+}
+
+static void EndCapture(void)
+{
+	if (!capActive)
+		return;
+	capActive = false;
+	SItem &it = items[capItem];
+	if (capNever || capFail)
+	{
+		polys.resize(capPoly0);
+		RRE_StaticTruncate(capVert0);
+		if (capNever) { it.state = ST_NEVER; it.why = capWhy; stNever++; }
+		else needReset = true; // pool full: flush and recapture
+		return;
+	}
+	it.state = ST_VALID; it.gen = gen;
+	it.hasOff = curHasOff ? 1 : 0; it.to = curTo; it.ro = curRo;
+	it.firstPoly = (UINT32)capPoly0;
+	it.numPolys = (UINT16)(polys.size() - capPoly0);
+	stCapt++;
+}
+
+static void Never(void) { if (capActive) { capNever = true; if (!capWhy) capWhy = 2; } }
+
+static boolean SectorOk(const sector_t *s) { return !s || s->heightsec == -1; }
+} // namespace rre_static
+
+// Called by HWR_ProcessPolygon (hw_batching.cpp) for every polygon.
+void RRE_StaticCapturePoly(FSurfaceInfo *surf, FOutVector *v, FUINT n, FBITFIELD flags, boolean horizon)
+{
+	using namespace rre_static;
+	if (!capActive)
+		return;
+	if (horizon || n < 3 || n > 255 || (flags & (PF_Fog | PF_NoDepthTest))
+		|| (flags & PF_EnvironmentTrans)) // note: PF_Blending includes PF_Invert == PF_Occlude
+	{
+		capNever = true;
+		if (!capWhy) capWhy = (n > 255) ? 5 : 3;
+		return;
+	}
+	// Zero-area polygon (e.g. a wall of height 0 from slope rounding): skipped.
+	// Invisible anyway.
+	{
+		double ax = 0, ay = 0, az = 0;
+		for (FUINT i = 1; i + 1 < n; i++)
+		{
+			const double ux = v[i].x - v[0].x, uy = v[i].y - v[0].y, uz = v[i].z - v[0].z;
+			const double wx = v[i+1].x - v[0].x, wy = v[i+1].y - v[0].y, wz = v[i+1].z - v[0].z;
+			ax += uy*wz - uz*wy; ay += uz*wx - ux*wz; az += ux*wy - uy*wx;
+		}
+		if (ax*ax + ay*ay + az*az < 1.0) return; // area < 0.5 (0.001-wide slivers)
+	}
+	GLMipmap_t *mip = (flags & PF_NoTexture) ? NULL : rre_lastmip;
+	if (!mip && !(flags & PF_NoTexture)) { capNever = true; if (!capWhy) capWhy = 4; return; }
+	// rgb = tint; the alpha byte carries the LIGHT LEVEL (the shader does the
+	// distance darkening). Colored fade (colored fog): not cached
+	// (the normal path handles it correctly).
+	if (surf && (flags & PF_Modulated) && (surf->FadeColor.rgba & 0x00FFFFFFu))
+	{
+		capNever = true;
+		if (!capWhy) capWhy = 3;
+		return;
+	}
+	// The cache draws with per-vertex light (alpha) and the default black fade; with
+	// shaders the tint goes in a uniform (not in PolyColor). Anything that does not fit: normal path.
+	if (surf
+		&& (surf->TintColor.s.alpha != 0 || surf->FadeColor.rgba != GL_DEFAULTFOG
+		|| surf->LightInfo.fade_start != 0 || surf->LightInfo.fade_end != 31
+		|| surf->LightInfo.directional || surf->PolyColor.s.alpha != 0xFF || (flags & PF_Ripple)))
+	{
+		capNever = true;
+		if (!capWhy) capWhy = 3;
+		return;
+	}
+	const UINT32 col = (surf && (flags & (PF_Modulated | PF_NoTexture)))
+		? ((surf->PolyColor.rgba & 0x00FFFFFFu) | ((UINT32)(surf->LightInfo.light_level & 0xFF) << 24))
+		: 0xFFFFFFFFu;
+	// FIXED memory: polys/groups are reserved at map load and never grow
+	// (growing asks for a contiguous block twice as big, which can fail on a fragmented
+	// heap -> std::bad_alloc mid-race). Full = flush and recapture.
+	if (polys.size() >= polys.capacity() || groups.size() >= groups.capacity()) { capFail = true; return; }
+	const int base = RRE_StaticAdd(v, (int)n, col);
+	if (base < 0) { capFail = true; return; }
+	// Wall textures are grouped by BASE texture (animated ones included).
+	const boolean byBase = (mip && rre_texreq.kind == 1 && rre_texreq.b >= 0 && rre_texreq.b < numtextures
+		&& R_GetTextureNum(rre_texreq.b) == rre_texreq.a);
+	const UINT64 key = byBase ? (((UINT64)(UINT32)(rre_texreq.b + 1) << 32) | (UINT32)flags)
+		: (((UINT64)(uintptr_t)mip << 32) | (UINT32)flags);
+	UINT16 g;
+	auto f = groupMap.find(key);
+	if (f == groupMap.end())
+	{
+		if (groups.size() >= 65535) { capFail = true; return; }
+		g = (UINT16)groups.size();
+		groups.push_back(SGroup{ mip, flags, {}, rre_texreq, mip ? rre_lastbright : NULL });
+		groupMap.emplace(key, g);
+	}
+	else g = f->second;
+	float sx = 0.0f, sy = 0.0f;
+	if (rre_texreq.kind == 1 && rre_lastgrtex && mip == &rre_lastgrtex->mipmap)
+		{ sx = rre_lastgrtex->scaleX; sy = rre_lastgrtex->scaleY; }
+	else if (byBase && rre_lastgrtex)
+		{ sx = rre_lastgrtex->scaleX; sy = rre_lastgrtex->scaleY; }
+	polys.push_back(SPoly{ (UINT16)base, (UINT8)n, curKind, g, sx, sy });
+	if (curSimple)
+	{
+		SItem &ci = items[capItem];
+		if (curKind >= 8) // FOF wall (from the back sector), bit = FOF order
+		{
+			const UINT32 b = 1u << (curKind - 8);
+			if (n != 4 || sy == 0.0f || (ci.fofMask & b)) ci.patchOk = 0;
+			ci.fofMask |= b;
+		}
+		else
+		{
+			if (curKind == 0 || (curKind != 6 && n != 4) || (curKind <= 3 && sy == 0.0f) || (curKind != 6 && (ci.kmask & (1u << curKind)))) ci.patchOk = 0;
+			ci.kmask |= (UINT8)(1u << curKind);
+		}
+	}
+}
+
+
+// Diagnostics: which sector/side fields change over time.
+namespace rre_chg {
+	struct SecSnap { fixed_t fh, ch, fx, fy, cx, cy; INT16 light; INT32 fpic, cpic; void *cmap; INT32 nl; angle_t fa, ca; };
+	struct SideSnap { fixed_t to, ro; INT32 t, m, b; };
+	static std::vector<SecSnap> sec; static std::vector<SideSnap> sid;
+	static int frames = 0;
+	static SecSnap Snap(const sector_t *s) { return SecSnap{ s->floorheight, s->ceilingheight, s->floor_xoffs, s->floor_yoffs, s->ceiling_xoffs, s->ceiling_yoffs, s->lightlevel, s->floorpic, s->ceilingpic, s->extra_colormap, s->numlights, s->floorpic_angle, s->ceilingpic_angle }; }
+	static SideSnap SnapS(const side_t *d) { return SideSnap{ d->textureoffset, d->rowoffset, d->toptexture, d->midtexture, d->bottomtexture }; }
+	void Tick(void)
+	{
+		if (sec.size() != numsectors || sid.size() != numsides)
+		{
+			sec.resize(numsectors); sid.resize(numsides);
+			for (size_t i = 0; i < numsectors; i++) sec[i] = Snap(&sectors[i]);
+			for (size_t i = 0; i < numsides; i++) sid[i] = SnapS(&sides[i]);
+			frames = 0; return;
+		}
+		if (++frames < 60) return;
+		frames = 0;
+		int c[12] = {0};
+		for (size_t i = 0; i < numsectors; i++)
+		{
+			SecSnap n = Snap(&sectors[i]), &o = sec[i];
+			c[0] += n.fh != o.fh; c[1] += n.ch != o.ch; c[2] += (n.fx != o.fx || n.fy != o.fy); c[3] += (n.cx != o.cx || n.cy != o.cy);
+			c[4] += n.light != o.light; c[5] += (n.fpic != o.fpic || n.cpic != o.cpic); c[6] += n.cmap != o.cmap; c[7] += n.nl != o.nl;
+			c[8] += (n.fa != o.fa || n.ca != o.ca);
+			o = n;
+		}
+		for (size_t i = 0; i < numsides; i++)
+		{
+			SideSnap n = SnapS(&sides[i]), &o = sid[i];
+			c[9] += (n.to != o.to || n.ro != o.ro); c[10] += (n.t != o.t || n.m != o.m || n.b != o.b);
+			o = n;
+		}
+		RR_DIAGPRINT("[CHG] 60f sectors: floor_h=%d ceil_h=%d floor_ofs=%d ceil_ofs=%d light=%d flat=%d colormap=%d lights=%d angle=%d | sides: ofs=%d texture=%d\n",
+			c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7], c[8], c[9], c[10]);
+		RR_DIAGPRINT("[STATIC] never(changes) planes=%d walls=%d\n", rre_static::stWhyPlane, rre_static::stWhyWall);
+			{
+				// [CULPRIT2] once per map (3rd report): top 25 by count/60f, with texture name
+				static int rep2 = 0; static INT16 map2 = -1;
+				if (gamemap != map2) { map2 = gamemap; rep2 = 0; rre_static::culp2.clear(); }
+				if (++rep2 == 3)
+				{
+					std::vector<std::pair<UINT32, UINT64>> v;
+					for (auto &kv : rre_static::culp2) v.push_back({kv.second, kv.first});
+					std::sort(v.begin(), v.end(), [](const std::pair<UINT32, UINT64> &a, const std::pair<UINT32, UINT64> &b){ return a.first > b.first; });
+					for (size_t i = 0; i < v.size() && i < 25; i++)
+					{
+						const UINT32 sec = (UINT32)(v[i].second >> 32), kind = (UINT32)(v[i].second >> 28) & 0xF;
+						const INT32 tx = (INT32)(v[i].second & 0x0FFFFFFFu);
+						char nm[9] = "?";
+						if (kind == 1) { if (tx > 0 && tx < numtextures && textures[tx]) { memcpy(nm, textures[tx]->name, 8); nm[8] = 0; } else strcpy(nm, "(none)"); }
+						else if (tx >= 0 && (size_t)tx < numlevelflats) { memcpy(nm, levelflats[tx].name, 8); nm[8] = 0; }
+						const sector_t *sc = sec < numsectors ? &sectors[sec] : NULL;
+						RR_DIAGPRINT("[CULPRIT2] %s sector %u tag %d texture=%s count=%u\n", kind == 1 ? "wall" : (kind == 2 ? "floor" : "ceiling"),
+							(unsigned)sec, (sc && sc->tags.count) ? (int)sc->tags.tags[0] : 0, nm, (unsigned)v[i].first);
+					}
+					RR_DIAGPRINT("[CULPRIT2] total distinct=%u\n", (unsigned)v.size());
+					// [CULPRIT3] bits: 1 flat 2 sector_light 4 floor_light 8 colormap 16 blend 32 slope_z 64 slope_normal 128 offset 256 angle 512 flags 1024 height 2048 slope_ptr
+					std::vector<std::pair<UINT32, UINT32>> w;
+					for (auto &kv : rre_static::culp3) w.push_back({kv.second.second, kv.first});
+					std::sort(w.begin(), w.end(), [](const std::pair<UINT32, UINT32> &a, const std::pair<UINT32, UINT32> &b){ return a.first > b.first; });
+					for (size_t i = 0; i < w.size() && i < 10; i++)
+						RR_DIAGPRINT("[CULPRIT3] floor sector %u bits=%u count=%u\n", (unsigned)w[i].second, (unsigned)rre_static::culp3[w[i].second].first, (unsigned)w[i].first);
+					// [CULPRIT4] bits: 1 front_sector 2 back_sector 4 side 8 line 16 heights
+					std::vector<std::pair<UINT32, UINT64>> w4;
+					for (auto &kv : rre_static::culp4) w4.push_back({kv.second.second, kv.first});
+					std::sort(w4.begin(), w4.end(), [](const std::pair<UINT32, UINT64> &a, const std::pair<UINT32, UINT64> &b){ return a.first > b.first; });
+					for (size_t i = 0; i < w4.size() && i < 30; i++)
+						RR_DIAGPRINT("[CULPRIT4] wall front %u back %u bits=%u count=%u\n", (unsigned)(w4[i].second >> 32), (unsigned)(w4[i].second & 0xFFFFFFFFu),
+							(unsigned)rre_static::culp4[w4[i].second].first, (unsigned)w4[i].first);
+				}
+				rre_static::culp2.clear(); rre_static::culp3.clear(); rre_static::culp4.clear();
+			}
+		rre_static::stWhyPlane = rre_static::stWhyWall = 0;
+	}
+}
+// HWR_LoadLevel
+static void RRE_StaticLevelInit(void)
+{
+	using namespace rre_static;
+	enabled = !RRCfg_On("nostatic");
+	// Also in Low-End mode with OpenGL (drawn by r_opengl.cpp DrawStaticPool).
+	if (!(rr_lowend && rendermode == render_opengl))
+		enabled = false;
+	segBase = numsubsectors * 2;
+	try { items.assign(segBase + numsegs, SItem{ 0, 0, 0, 0, ST_NONE, 0, 0, 0, 0, 0, 0, 0, 0, 0 }); }
+	catch (const std::bad_alloc &) // out of memory -> no cache (slower, but no crash)
+	{
+		decltype(items)().swap(items); enabled = false;
+		RR_DIAGPRINT("[STATIC] OUT OF MEMORY for the cache (%u items): cache OFF\n", (unsigned)(segBase + numsegs));
+	}
+	secSig.assign(numsectors, 0);
+	secStamp.assign(numsectors, 0);
+	try { segMemo.assign(numsegs, SegMemo{}); } // ~36 B x segs, linear memory
+	catch (const std::bad_alloc &) { decltype(segMemo)().swap(segMemo); RR_DIAGPRINT("[STATIC] out of memory for segMemo: memo OFF\n"); }
+	secSigB.assign(numsectors, 0);
+	secStampB.assign(numsectors, 0);
+	secSigW.assign(numsectors, 0);
+	secStampW.assign(numsectors, 0);
+	secSigN.assign(numsectors, 0);
+	secStampN.assign(numsectors, 0);
+	// Fixed reservation (see AddPoly). ~16 B per poly; the maximum seen was ~11.6k.
+	try {
+	if (polys.capacity() < RRE_MAXPOLYS) { decltype(polys)().swap(polys); polys.reserve(RRE_MAXPOLYS); }
+	if (groups.capacity() < RRE_MAXGROUPS) { decltype(groups)().swap(groups); groups.reserve(RRE_MAXGROUPS); }
+	} catch (const std::bad_alloc &) { enabled = false; RR_DIAGPRINT("[STATIC] OUT OF MEMORY for polys/groups: cache OFF\n"); }
+	groupMap.reserve(RRE_MAXGROUPS);
+	needReset = true;
+	RR_DIAGPRINT("[STATIC] map: %u subsectors, %u segs, cache %s\n",
+		(unsigned)numsubsectors, (unsigned)numsegs, enabled ? "ON" : "OFF");
+}
+
+#define RRE_TEXTRANSP(t) ((t)->mipmap.flags & TF_TRANSPARENT)
+
+// Before HWR_RenderBSPNode
+static void RRE_StaticFrameBegin(void)
+{
+	using namespace rre_static;
+	stamp++;
+	if (needReset && RRE_StaticReset())
+	{
+		needReset = false;
+		gen++;
+		polys.clear();
+		groups.clear();
+		groupMap.clear();
+		stResets++;
+	}
+}
+
+static inline bool RRE_LfValid(const void *p)
+{
+	const levelflat_t *lf = (const levelflat_t *)p;
+	return levelflats && lf >= levelflats && lf < levelflats + numlevelflats;
+}
+
+// After the BSP (and HWR_RenderBatches): draws what is in the cache.
+static void RRE_StaticFrameDraw(void)
+{
+	using namespace rre_static;
+	EndCapture();
+	boolean any = false;
+	for (SGroup &g : groups)
+	{
+		if (g.idx.empty())
+			continue;
+		any = true;
+		// Animated texture: use the current frame.
+		if (g.req.kind == 1 && g.req.b >= 0 && g.req.b < numtextures && g.mip && !(g.flags & PF_NoTexture))
+		{
+			const INT32 cur = R_GetTextureNum(g.req.b);
+			if (cur != g.req.a && cur >= 0 && cur < numtextures)
+			{
+				GLMapTexture_t *t = HWR_GetTexture(cur, g.req.b);
+				if (t) { g.mip = &t->mipmap; g.req.a = cur; stAnim++; }
+			}
+		}
+		// Animated flat: use the current frame.
+		// The stored pointer can go stale if levelflats is reallocated
+		// (this crashed once): only use it if it is still inside the array.
+		if (g.req.kind == 2 && g.req.p && !RRE_LfValid(g.req.p))
+		{
+			g.req.p = NULL;
+			needReset = true; // recapture everything with fresh pointers
+		}
+		if (g.req.kind == 2 && g.req.p && g.mip && !(g.flags & PF_NoTexture))
+		{
+			levelflat_t *lf = (levelflat_t *)g.req.p;
+			if (lf->speed && (lf->type == LEVELFLAT_TEXTURE || lf->type == LEVELFLAT_FLAT))
+			{
+				const INT32 cur = lf->type == LEVELFLAT_TEXTURE ? lf->u.texture.num : (INT32)lf->u.flat.lumpnum;
+				if (cur != g.req.a)
+				{
+					rre_lastmip = NULL;
+					HWR_GetLevelFlat(lf, (boolean)g.req.b);
+					if (rre_lastmip) { g.mip = rre_lastmip; g.req.a = cur; stAnim++; }
+				}
+			}
+		}
+		// If the RAM copy was purged and the GPU evicted it, regenerate it
+		// through the same path that requested it (otherwise: empty/white frame).
+		if (g.mip && !(g.flags & PF_NoTexture) && !g.mip->downloaded && !g.mip->data)
+		{
+			switch (g.req.kind)
+			{
+				case 1: HWR_GetTexture(g.req.a, g.req.b); break;
+				case 2: if (g.req.p) HWR_GetLevelFlat((levelflat_t *)g.req.p, (boolean)g.req.b); break;
+				case 3: HWR_GetRawFlat((lumpnum_t)g.req.a, (boolean)g.req.b); break;
+				default: break;
+			}
+		}
+		const int r = RRE_StaticDraw(g.mip, g.bright, g.flags, g.idx.data(), (int)g.idx.size());
+		if (r == 0) { needReset = true; stDrawFail++; } // texture lost: recapture everything
+		else if (r < 0) stDrawFail++;
+		g.idx.clear();
+	}
+	if (any)
+		RRE_StaticEnd();
+
+	if (++stFrames >= 30)
+	{
+		RR_DIAGPRINT("[STATIC] 30f: used=%d captured=%d never=%d flushed=%d failed=%d | pool=%d verts, %u polys, %u groups\n",
+			stHits, stCapt, stNever, stResets, stDrawFail, RRE_StaticUsed(),
+			(unsigned)polys.size(), (unsigned)groups.size());
+		RR_DIAGPRINT("[STATIC] never used/30f: changes=%d translucent=%d flags=%d notex=%d big=%d other=%d\n",
+			stWhy[1], stWhy[2], stWhy[3], stWhy[4], stWhy[5], stWhy[0]);
+		RR_DIAGPRINT("[STATIC] animated frame changes/30f: %d  scrolled walls/30f: %d  patched heights/30f: %d  shape recaptures/30f: %d  never retries/30f: %d\n", stAnim, stShift, stPatch, stReshape, stRetry); stAnim = 0; stShift = 0; stPatch = 0; stReshape = 0; stRetry = 0;
+		for (int w = 0; w < 6; w++) stWhy[w] = 0;
+		stHits = stCapt = stNever = stResets = stDrawFail = stFrames = 0;
+	}
+}
+
 static void HWR_RenderPlane(subsector_t *subsector, extrasubsector_t *xsub, boolean isceiling, fixed_t fixedheight, FBITFIELD PolyFlags, INT32 lightlevel, levelflat_t *levelflat, sector_t *FOFsector, UINT8 alpha, extracolormap_t *planecolormap)
 {
 	polyvertex_t *  pv;
@@ -587,9 +1350,14 @@ static void HWR_RenderPlane(subsector_t *subsector, extrasubsector_t *xsub, bool
 		PolyFlags |= PF_ColorMapped;
 	}
 
+	if (FOFsector) DBG_TINT(&Surf, &PolyFlags, 255, 0, 255);
+	else if (isceiling) DBG_TINT(&Surf, &PolyFlags, 0, 255, 255);
+	else DBG_TINT(&Surf, &PolyFlags, 255, 0, 0);
 	HWR_ProcessPolygon(&Surf, planeVerts, nrPlaneVerts, PolyFlags, shader, false);
 
-	if (subsector)
+	// Horizon lines are disabled: they raised the floor up to the
+	// camera height (a huge plane covering the track).
+	if (false && subsector)
 	{
 		// Horizon lines
 		FOutVector horizonpts[6];
@@ -738,7 +1506,7 @@ FBITFIELD HWR_GetBlendModeFlag(INT32 ast)
 
 UINT8 HWR_GetTranstableAlpha(INT32 transtablenum)
 {
-	transtablenum = std::max(std::min(transtablenum, (INT32)tr_trans90), 0);
+	transtablenum = std::max<INT32>(std::min<INT32>(transtablenum, (INT32)tr_trans90), 0);
 
 	switch (transtablenum)
 	{
@@ -812,6 +1580,7 @@ static void HWR_ProjectWall(FOutVector *wallVerts, FSurfaceInfo *pSurf, FBITFIEL
 		blendmode |= PF_ColorMapped;
 	}
 
+	DBG_TINT(pSurf, &blendmode, 0, 255, 0);
 	HWR_ProcessPolygon(pSurf, wallVerts, 4, blendmode|PF_Modulated|PF_Occlude, shader, false);
 }
 
@@ -1020,8 +1789,10 @@ static void HWR_DrawSkyWall(FOutVector *wallVerts, FSurfaceInfo *Surf)
 // Anything between means the wall segment has been clipped with solidsegs,
 //  reducing wall overdraw to a minimum
 //
+#define RRE_KIND(k) (rre_static::curKind = (k))
 static void HWR_ProcessSeg(void) // Sort of like GLWall::Process in GZDoom
 {
+	RRE_KIND(0);
 	FOutVector wallVerts[4];
 	v2d_t vs, ve; // start, end vertices of 2d line (view from above)
 
@@ -1134,6 +1905,7 @@ static void HWR_ProcessSeg(void) // Sort of like GLWall::Process in GZDoom
 		// check TOP TEXTURE
 		if ((worldhighslope < worldtopslope || worldhigh < worldtop) && gl_toptexture)
 		{
+			RRE_KIND(1);
 			{
 				fixed_t texturevpegtop; // top
 
@@ -1190,12 +1962,12 @@ static void HWR_ProcessSeg(void) // Sort of like GLWall::Process in GZDoom
 			{
 				FBITFIELD polyflags = PF_Masked;
 
-				if (grTex->mipmap.flags & TF_TRANSPARENT)
+				if (RRE_TEXTRANSP(grTex))
 					polyflags = PF_Environment;
 
 				if (gl_frontsector->numlights)
 					HWR_SplitWall(gl_frontsector, wallVerts, gl_toptexture, gl_basetoptexture, &Surf, FOF_CUTLEVEL, NULL, polyflags);
-				else if (grTex->mipmap.flags & TF_TRANSPARENT)
+				else if (RRE_TEXTRANSP(grTex))
 					HWR_AddTransparentWall(wallVerts, &Surf, gl_toptexture, gl_basetoptexture, polyflags, false, lightnum, colormap);
 				else
 					HWR_ProjectWall(wallVerts, &Surf, polyflags, lightnum, colormap);
@@ -1207,6 +1979,7 @@ static void HWR_ProcessSeg(void) // Sort of like GLWall::Process in GZDoom
 			worldlowslope > worldbottomslope ||
             worldlow > worldbottom) && gl_bottomtexture) //only if VISIBLE!!!
 		{
+			RRE_KIND(2);
 			{
 				fixed_t texturevpegbottom = 0; // bottom
 
@@ -1263,12 +2036,12 @@ static void HWR_ProcessSeg(void) // Sort of like GLWall::Process in GZDoom
 			{
 				FBITFIELD polyflags = PF_Masked;
 
-				if (grTex->mipmap.flags & TF_TRANSPARENT)
+				if (RRE_TEXTRANSP(grTex))
 					polyflags = PF_Environment;
 
 				if (gl_frontsector->numlights)
 					HWR_SplitWall(gl_frontsector, wallVerts, gl_bottomtexture, gl_basebottomtexture, &Surf, FOF_CUTLEVEL, NULL, polyflags);
-				else if (grTex->mipmap.flags & TF_TRANSPARENT)
+				else if (RRE_TEXTRANSP(grTex))
 					HWR_AddTransparentWall(wallVerts, &Surf, gl_bottomtexture, gl_basebottomtexture, polyflags, false, lightnum, colormap);
 				else
 					HWR_ProjectWall(wallVerts, &Surf, polyflags, lightnum, colormap);
@@ -1277,6 +2050,7 @@ static void HWR_ProcessSeg(void) // Sort of like GLWall::Process in GZDoom
 		gl_midtexture = R_GetTextureNum(gl_sidedef->midtexture);
 		if (gl_midtexture)
 		{
+			RRE_KIND(3);
 			FBITFIELD blendmode;
 			sector_t *front, *back;
 			fixed_t  popentop, popenbottom, polytop, polybottom, lowcut, highcut;
@@ -1515,6 +2289,7 @@ static void HWR_ProcessSeg(void) // Sort of like GLWall::Process in GZDoom
 			{
 				if (gl_backsector->ceilingpic != skyflatnum) // don't cull if back sector is also sky
 				{
+					RRE_KIND(4);
 					wallVerts[2].y = wallVerts[3].y = FIXED_TO_FLOAT(INT32_MAX); // draw to top of map space
 					wallVerts[0].y = FIXED_TO_FLOAT(worldtop);
 					wallVerts[1].y = FIXED_TO_FLOAT(worldtopslope);
@@ -1526,6 +2301,7 @@ static void HWR_ProcessSeg(void) // Sort of like GLWall::Process in GZDoom
 			{
 				if (gl_backsector->floorpic != skyflatnum) // don't cull if back sector is also sky
 				{
+					RRE_KIND(5);
 					wallVerts[3].y = FIXED_TO_FLOAT(worldbottom);
 					wallVerts[2].y = FIXED_TO_FLOAT(worldbottomslope);
 					wallVerts[0].y = wallVerts[1].y = FIXED_TO_FLOAT(INT32_MIN); // draw to bottom of map space
@@ -1533,6 +2309,7 @@ static void HWR_ProcessSeg(void) // Sort of like GLWall::Process in GZDoom
 				}
 			}
 		}
+		RRE_KIND(0);
 	}
 	else
 	{
@@ -1595,7 +2372,7 @@ static void HWR_ProcessSeg(void) // Sort of like GLWall::Process in GZDoom
 			else
 			{
 				FBITFIELD blendmode = PF_Masked;
-				if (grTex->mipmap.flags & TF_TRANSPARENT)
+				if (RRE_TEXTRANSP(grTex))
 					blendmode = PF_Environment;
 
 				// I don't think that solid walls can use translucent linedef types...
@@ -1603,7 +2380,7 @@ static void HWR_ProcessSeg(void) // Sort of like GLWall::Process in GZDoom
 					HWR_SplitWall(gl_frontsector, wallVerts, gl_midtexture, gl_sidedef->midtexture, &Surf, FOF_CUTLEVEL, NULL, blendmode);
 				else
 				{
-					if (grTex->mipmap.flags & TF_TRANSPARENT)
+					if (RRE_TEXTRANSP(grTex))
 						HWR_AddTransparentWall(wallVerts, &Surf, gl_midtexture, gl_sidedef->midtexture, blendmode, false, lightnum, colormap);
 					else
 						HWR_ProjectWall(wallVerts, &Surf, blendmode, lightnum, colormap);
@@ -1651,8 +2428,11 @@ static void HWR_ProcessSeg(void) // Sort of like GLWall::Process in GZDoom
 
 		if (gl_backsector->ffloors)
 		{
+			INT32 rr_ord = -1; (void)rr_ord;
 			for (rover = gl_backsector->ffloors; rover; rover = rover->next)
 			{
+				rr_ord++;
+				RRE_KIND(0);
 				boolean bothsides = false;
 				// Skip if it exists on both sectors.
 				ffloor_t * r2;
@@ -1675,6 +2455,7 @@ static void HWR_ProcessSeg(void) // Sort of like GLWall::Process in GZDoom
 
 				if ((high1 < lowcut && highslope1 < lowcutslope) || (low1 > highcut && lowslope1 > highcutslope))
 					continue;
+				RRE_KIND(rr_ord < 24 ? 8 + rr_ord : 0);
 
 				basetexnum = sides[rover->master->sidenum[0]].midtexture;
 
@@ -1794,7 +2575,7 @@ static void HWR_ProcessSeg(void) // Sort of like GLWall::Process in GZDoom
 						if (rover->alpha < 256 || rover->blend)
 						{
 							blendmode = HWR_GetBlendModeFlag(rover->blend);
-							Surf.PolyColor.s.alpha = std::max(0, std::min(rover->alpha, 255));
+							Surf.PolyColor.s.alpha = std::max<INT32>(0, std::min<INT32>(rover->alpha, 255));
 						}
 					}
 
@@ -1811,6 +2592,7 @@ static void HWR_ProcessSeg(void) // Sort of like GLWall::Process in GZDoom
 			}
 		}
 
+		RRE_KIND(0);
 		if (gl_frontsector->ffloors) // Putting this seperate should allow 2 FOF sectors to be connected without too many errors? I think?
 		{
 			for (rover = gl_frontsector->ffloors; rover; rover = rover->next)
@@ -1923,7 +2705,7 @@ static void HWR_ProcessSeg(void) // Sort of like GLWall::Process in GZDoom
 						if (rover->alpha < 256 || rover->blend)
 						{
 							blendmode = HWR_GetBlendModeFlag(rover->blend);
-							Surf.PolyColor.s.alpha = std::max(0, std::min(rover->alpha, 255));
+							Surf.PolyColor.s.alpha = std::max<INT32>(0, std::min<INT32>(rover->alpha, 255));
 						}
 					}
 
@@ -2035,7 +2817,417 @@ static boolean CheckClip(seg_t * seg, sector_t * afrontsector, sector_t * abacks
 // HWR_AddLine      : Clips the given segment and adds any visible pieces to the line list.
 // Notes            : gl_cursectorlight is set to the current subsector -> sector -> light value
 //                  : (it may be mixed with the wall's own flat colour in the future ...)
+// [SUB] breakdown inside the BSP, only 1 frame in 4 (sampling).
+namespace rre_sub {
+	enum { S_FAKE, S_PLANES, S_POLY, S_SPR, S_LINES, S_N };
+	static UINT64 accV[2][S_N];
+	static UINT64 nSubV[2], nLinesV[2], bspTotV[2], skyBgV[2];
+	static UINT64 segT[2], nFront[2], nProc[2], nMiss[2], nAngReuse[2];
+	static UINT64 sigT[2], useT[2], missT[2]; // breakdown of process_time
+	static int framesV[2];
+	static int on = 0, frameNo = 0, view = 0;
+	static UINT64 last;
+	static inline void Start(void) { if (on) last = I_GetPreciseTime(); }
+	static inline void Mark(int seg) { if (on) { UINT64 n = I_GetPreciseTime(); accV[view][seg] += n - last; last = n; } }
+}
+#define SUB_START() rre_sub::Start()
+#define SUB_MARK(x) rre_sub::Mark(rre_sub::x)
 // -----------------+
+// Wraps HWR_ProcessSeg with the static geometry cache.
+// Sector data that only depends on the view (heights, light, colormap):
+// computed once per sector and view, not for every subsector (~3 per sector).
+namespace rre_seccache {
+	struct E { UINT32 stamp; fixed_t cullF, cullC, locF, locC; INT32 fll, cll; extracolormap_t *fcm, *ccm; };
+	static std::vector<E> e;
+	static UINT32 stamp = 1;
+	void LevelReset(void) { e.assign(numsectors, E{0, 0, 0, 0, 0, 0, 0, NULL, NULL}); stamp = 1; }
+}
+// Recomputes y/t of a simple wall (no slopes) with the current heights,
+// same as HWR_ProcessSeg. False if the set of visible pieces changes (must recapture).
+// Actual heights at both ends of the seg (with static slopes)
+static void RRE_WorldH(fixed_t &wt, fixed_t &wts, fixed_t &wb, fixed_t &wbs, fixed_t &wh, fixed_t &whs, fixed_t &wl, fixed_t &wls)
+{
+	const sector_t *fs = gl_frontsector, *bs = gl_backsector;
+	const fixed_t v1x = FLOAT_TO_FIXED(((polyvertex_t *)gl_curline->pv1)->x), v1y = FLOAT_TO_FIXED(((polyvertex_t *)gl_curline->pv1)->y);
+	const fixed_t v2x = FLOAT_TO_FIXED(((polyvertex_t *)gl_curline->pv2)->x), v2y = FLOAT_TO_FIXED(((polyvertex_t *)gl_curline->pv2)->y);
+	wt = P_GetZAt(fs->c_slope, v1x, v1y, fs->ceilingheight); wts = P_GetZAt(fs->c_slope, v2x, v2y, fs->ceilingheight);
+	wb = P_GetZAt(fs->f_slope, v1x, v1y, fs->floorheight);   wbs = P_GetZAt(fs->f_slope, v2x, v2y, fs->floorheight);
+	wh = P_GetZAt(bs->c_slope, v1x, v1y, bs->ceilingheight); whs = P_GetZAt(bs->c_slope, v2x, v2y, bs->ceilingheight);
+	wl = P_GetZAt(bs->f_slope, v1x, v1y, bs->floorheight);   wls = P_GetZAt(bs->f_slope, v2x, v2y, bs->floorheight);
+}
+static UINT8 RRE_SimpleMask(void)
+{
+	const sector_t *fs = gl_frontsector, *bs = gl_backsector;
+	const side_t *sd = gl_curline->sidedef;
+	UINT8 m = 0;
+	const boolean csky = fs->ceilingpic == skyflatnum && bs->ceilingpic == skyflatnum;
+	const boolean fsky = fs->floorpic == skyflatnum && bs->floorpic == skyflatnum;
+	fixed_t wt, wts, wb, wbs, wh, whs, wl, wls; RRE_WorldH(wt, wts, wb, wbs, wh, whs, wl, wls);
+	if (!csky && R_GetTextureNum(sd->toptexture) && (whs < wts || wh < wt)) m |= 1u << 1;
+	if (!fsky && R_GetTextureNum(sd->bottomtexture) && (wls > wbs || wl > wb)) m |= 1u << 2;
+	if (R_GetTextureNum(sd->midtexture)) m |= 1u << 3;
+	if (!gl_curline->polyseg)
+	{
+		if (fs->ceilingpic == skyflatnum && bs->ceilingpic != skyflatnum) m |= 1u << 4;
+		if (fs->floorpic == skyflatnum && bs->floorpic != skyflatnum) m |= 1u << 5;
+	}
+	return m;
+}
+// Which FOFs of the back sector draw a wall right now (same as HWR_ProcessSeg, no slopes)
+static UINT32 RRE_FofMask(void)
+{
+	const sector_t *fs = gl_frontsector, *bs = gl_backsector;
+	if (!bs->ffloors || Tag_Compare(&fs->tags, &bs->tags)) return 0;
+	const fixed_t lowcut = std::max(fs->floorheight, bs->floorheight), highcut = std::min(fs->ceilingheight, bs->ceilingheight);
+	UINT32 m = 0; int k = 0;
+	for (const ffloor_t *r = bs->ffloors; r; r = r->next, k++)
+	{
+		if (!(r->fofflags & FOF_EXISTS) || !(r->fofflags & FOF_RENDERSIDES)) continue;
+		if (!(r->fofflags & FOF_ALLSIDES) && (r->fofflags & FOF_INVERTSIDES)) continue;
+		if (*r->topheight < lowcut || *r->bottomheight > highcut) continue;
+		if (k < 24) m |= 1u << k;
+	}
+	return m;
+}
+static boolean RRE_PatchSegHeights(const rre_static::SItem &it)
+{
+	using namespace rre_static;
+	if (RRE_SimpleMask() != it.kmask || RRE_FofMask() != it.fofMask)
+		return false;
+	const sector_t *fs = gl_frontsector, *bs = gl_backsector;
+	const side_t *sd = gl_curline->sidedef;
+	const line_t *ld = gl_curline->linedef;
+	const fixed_t wt = fs->ceilingheight, wb = fs->floorheight, wh = bs->ceilingheight, wl = bs->floorheight;
+	fixed_t xwt, xwts, xwb, xwbs, xwh, xwhs, xwl, xwls; RRE_WorldH(xwt, xwts, xwb, xwbs, xwh, xwhs, xwl, xwls);
+	const boolean anySl = fs->f_slope || fs->c_slope || bs->f_slope || bs->c_slope;
+	for (UINT32 p = it.firstPoly; p < it.firstPoly + it.numPolys; p++)
+	{
+		const SPoly &sp = polys[p];
+		float y[4], t[4];
+		const float sy = sp.sy;
+		switch (sp.pad)
+		{
+			case 1: // top (with static slopes, same as HWR_ProcessSeg)
+			{
+				const INT32 tex = R_GetTextureNum(sd->toptexture);
+				fixed_t v;
+				if (ld->flags & ML_DONTPEGTOP) v = 0;
+				else if (ld->flags & ML_SKEWTD) v = xwh + textureheight[sd->toptexture] - xwt;
+				else v = bs->ceilingheight + textureheight[sd->toptexture] - fs->ceilingheight;
+				v += sd->rowoffset;
+				v %= (textures[tex]->height) << FRACBITS;
+				t[3] = t[2] = v * sy; t[0] = t[1] = (v + fs->ceilingheight - bs->ceilingheight) * sy;
+				if (!(ld->flags & ML_SKEWTD))
+				{
+					t[3] -= (xwt - fs->ceilingheight) * sy; t[2] -= (xwts - fs->ceilingheight) * sy;
+					t[0] -= (xwh - bs->ceilingheight) * sy; t[1] -= (xwhs - bs->ceilingheight) * sy;
+				}
+				else if (ld->flags & ML_DONTPEGTOP)
+				{
+					t[0] = (v + xwt - xwh) * sy; t[1] = (v + xwts - xwhs) * sy;
+				}
+				else
+				{
+					t[0] = t[1] = (v + xwt - xwh) * sy;
+					t[3] = t[0] - (xwt - xwh) * sy; t[2] = t[1] - (xwts - xwhs) * sy;
+				}
+				y[3] = FIXED_TO_FLOAT(xwt); y[0] = FIXED_TO_FLOAT(xwh); y[2] = FIXED_TO_FLOAT(xwts); y[1] = FIXED_TO_FLOAT(xwhs);
+				break;
+			}
+			case 2: // bottom (with static slopes)
+			{
+				const INT32 tex = R_GetTextureNum(sd->bottomtexture);
+				fixed_t v;
+				if (!(ld->flags & ML_DONTPEGBOTTOM)) v = 0;
+				else if (ld->flags & ML_SKEWTD) v = xwb - xwl;
+				else v = fs->floorheight - bs->floorheight;
+				v += sd->rowoffset;
+				v %= (textures[tex]->height) << FRACBITS;
+				t[3] = t[2] = v * sy; t[0] = t[1] = (v + bs->floorheight - fs->floorheight) * sy;
+				if (!(ld->flags & ML_SKEWTD))
+				{
+					t[0] -= (xwb - fs->floorheight) * sy; t[1] -= (xwbs - fs->floorheight) * sy;
+					t[3] -= (xwl - bs->floorheight) * sy; t[2] -= (xwls - bs->floorheight) * sy;
+				}
+				else if (ld->flags & ML_DONTPEGBOTTOM)
+				{
+					t[0] = t[1] = (v + xwl - xwb) * sy;
+					t[2] = t[1] - (xwls - xwbs) * sy;
+				}
+				else
+				{
+					t[0] = (v + xwl - xwb) * sy; t[1] = (v + xwls - xwbs) * sy;
+				}
+				y[3] = FIXED_TO_FLOAT(xwl); y[0] = FIXED_TO_FLOAT(xwb); y[2] = FIXED_TO_FLOAT(xwls); y[1] = FIXED_TO_FLOAT(xwbs);
+				break;
+			}
+			case 3: // middle
+			{
+				if (anySl) return false;
+				const INT32 mid = R_GetTextureNum(sd->midtexture);
+				const sector_t *front = ld->frontsector, *back = ld->backsector;
+				const INT32 repeats = sd->repeatcnt ? 1 + sd->repeatcnt : 1;
+				const fixed_t popentop = std::min(wt, wh), popenbottom = std::max(wb, wl);
+				fixed_t polytop, polybottom;
+				if (ld->flags & ML_NOSKEW)
+				{
+					if (ld->flags & ML_MIDPEG)
+					{
+						polybottom = std::max(front->floorheight, back->floorheight) + sd->rowoffset;
+						polytop = polybottom + textureheight[mid]*repeats;
+					}
+					else
+					{
+						polytop = std::min(front->ceilingheight, back->ceilingheight) + sd->rowoffset;
+						polybottom = polytop - textureheight[mid]*repeats;
+					}
+				}
+				else if (ld->flags & ML_MIDPEG)
+				{
+					polybottom = popenbottom + sd->rowoffset;
+					polytop = polybottom + textureheight[mid]*repeats;
+				}
+				else
+				{
+					polytop = popentop + sd->rowoffset;
+					polybottom = polytop - textureheight[mid]*repeats;
+				}
+				const fixed_t h = std::min(popentop, polytop), l = std::max(polybottom, popenbottom);
+				const fixed_t v = (ld->flags & ML_MIDPEG) ? textureheight[sd->midtexture]*repeats - h + polybottom : polytop - h;
+				t[3] = t[2] = v * sy; t[0] = t[1] = (h - l + v) * sy;
+				y[2] = y[3] = FIXED_TO_FLOAT(h); y[0] = y[1] = FIXED_TO_FLOAT(l);
+				break;
+			}
+			case 4: // sky, top
+				if (anySl) return false;
+				y[2] = y[3] = FIXED_TO_FLOAT(INT32_MAX); y[0] = y[1] = FIXED_TO_FLOAT(wt);
+				t[0] = t[1] = t[2] = t[3] = 0.0f;
+				break;
+			case 5: // sky, bottom
+				if (anySl) return false;
+				y[3] = y[2] = FIXED_TO_FLOAT(wb); y[0] = y[1] = FIXED_TO_FLOAT(INT32_MIN);
+				t[0] = t[1] = t[2] = t[3] = 0.0f;
+				break;
+			default:
+			{
+				if (sp.pad < 8 || anySl) return false;
+				// FOF wall of the back sector (order sp.pad-8)
+				const ffloor_t *r = bs->ffloors; for (int k = 8; r && k < sp.pad; k++) r = r->next;
+				if (!r) return false;
+				const fixed_t lowcut = std::max(wb, wl), highcut = std::min(wt, wh);
+				const fixed_t top = *r->topheight, bot = *r->bottomheight;
+				fixed_t hh = top, ll = bot;
+				if (hh >= highcut) hh = highcut;
+				if (ll <= lowcut) ll = lowcut;
+				fixed_t v = sides[r->master->sidenum[0]].rowoffset;
+				const boolean attach = (ld->flags & ML_DONTPEGBOTTOM) != 0;
+				if (!(r->master->flags & ML_SKEWTD))
+				{
+					if (attach) v -= top - bot;
+					t[3] = t[2] = (top - hh + v) * sy; t[0] = t[1] = (top - ll + v) * sy;
+				}
+				else if (!attach) { t[3] = t[2] = v * sy; t[0] = t[1] = (hh - ll + v) * sy; }
+				else { t[0] = t[1] = v * sy; t[3] = t[2] = t[0] - (hh - ll) * sy; }
+				y[3] = y[2] = FIXED_TO_FLOAT(hh); y[0] = y[1] = FIXED_TO_FLOAT(ll);
+				break;
+			}
+		}
+		RRE_StaticSetYT(sp.base, 4, y, t);
+	}
+	return true;
+}
+// Flat plane (no slope): only the height changes -> every y becomes the new one
+static boolean RRE_PatchHeights(size_t item, const rre_static::SItem &it)
+{
+	using namespace rre_static;
+	if (item >= segBase)
+		return RRE_PatchSegHeights(it);
+	if (it.kmask != (1u << 6))
+		return false;
+	for (UINT32 p = it.firstPoly; p < it.firstPoly + it.numPolys; p++)
+		RRE_StaticSetY(polys[p].base, polys[p].n, curPlaneY);
+	return true;
+}
+static void RRE_ProcessSegCachedImpl(void);
+static void RRE_ProcessSegCached(void)
+{
+	if (rre_sub::on)
+	{
+		const UINT64 t0 = I_GetPreciseTime();
+		RRE_ProcessSegCachedImpl();
+		rre_sub::segT[rre_sub::view] += I_GetPreciseTime() - t0;
+		rre_sub::nProc[rre_sub::view]++;
+		return;
+	}
+	RRE_ProcessSegCachedImpl();
+}
+static int RRE_ViewNow(void) { return rre_sub::view; }
+static void RRE_ProcessSegCachedImpl(void)
+{
+	using namespace rre_static;
+	seg_t *line = gl_curline;
+	if (enabled && line >= segs && line < segs + numsegs && !line->polyseg
+		&& SectorOk(line->frontsector) && SectorOk(line->backsector)
+		&& gl_frontsector >= sectors && gl_frontsector < sectors + numsectors
+		&& (!gl_backsector || (gl_backsector >= sectors && gl_backsector < sectors + numsectors)))
+	{
+		const UINT64 rrT0 = rre_sub::on ? I_GetPreciseTime() : 0;
+		// Simple wall -> signature without heights; heights go in curSigH and get patched
+		const sector_t *fs = gl_frontsector, *bs = gl_backsector;
+		// Reuse what was decided if nothing about this wall changed
+		const size_t segIdx = (size_t)(line - segs);
+		const UINT32 mF = SectorSig(fs), mB = bs ? SectorSig(bs) : 0xBAC0u;
+		UINT32 mK = 2166136261u;
+		if (const side_t *sd = line->sidedef)
+		{
+			mK = H(mK, (UINT32)sd->rowoffset); mK = H(mK, (UINT32)sd->toptexture); mK = H(mK, (UINT32)sd->midtexture);
+			mK = H(mK, (UINT32)sd->bottomtexture); mK = H(mK, (UINT32)sd->repeatcnt);
+		}
+		else mK = H(mK, 0x5Du);
+		if (const line_t *ld = line->linedef) { mK = H(mK, (UINT32)ld->flags); mK = H(mK, (UINT32)ld->alpha); mK = H(mK, (UINT32)ld->blendmode); }
+		const UINT32 mFs = (UINT32)(fs - sectors), mBs = bs ? (UINT32)(bs - sectors) : 0xFFFFFFFFu;
+		SegMemo *mm = segIdx < segMemo.size() ? &segMemo[segIdx] : NULL;
+		UINT32 sig;
+		if (mm && mm->ok && mm->fSig == mF && mm->bSig == mB && mm->sKey == mK && mm->fs == mFs && mm->bs == mBs)
+		{
+			sig = mm->sig; curSigH = mm->sigH; curSimple = mm->simple ? true : false; stMemoHit++;
+		}
+		else
+		{
+			// STATIC slopes allowed if there are only top/bottom walls (whack-a-mole moles)
+			const boolean anySl = bs && (fs->f_slope || fs->c_slope || bs->f_slope || bs->c_slope);
+			const auto dynSl = [](const pslope_t *p) { return p && (p->flags & SL_DYNAMIC); };
+			const boolean slOk = !anySl || (line->sidedef && !line->sidedef->midtexture && !bs->ffloors && !bs->numlights
+				&& !dynSl(fs->f_slope) && !dynSl(fs->c_slope) && !dynSl(bs->f_slope) && !dynSl(bs->c_slope)
+				&& (fs->ceilingpic == skyflatnum) == (bs->ceilingpic == skyflatnum)
+				&& (fs->floorpic == skyflatnum) == (bs->floorpic == skyflatnum));
+			curSimple = (bs && line->linedef && line->sidedef && slOk
+				&& !fs->numlights && !fs->ffloors
+				&& !(line->linedef->flags & ML_WRAPMIDTEX) && !P_IsLineTripWire(line->linedef));
+			// FOFs in the back sector (drums): allowed if they are flat and simple
+			boolean bFof = false;
+			if (curSimple && (bs->ffloors || bs->numlights))
+			{
+				bFof = true; int k = 0;
+				for (const ffloor_t *r = bs->ffloors; r; r = r->next, k++)
+					if (k >= 24 || (r->t_slope && *r->t_slope) || (r->b_slope && *r->b_slope) || !r->topheight || !r->bottomheight
+						|| !r->master || (r->master->flags & ML_TFERLINE) || r->master->sidenum[0] == 0xffff)
+						{ curSimple = false; break; }
+			}
+			if (curSimple)
+			{
+				sig = H(SectorSigNoH(fs), bFof ? SectorSigRaw(bs, 2 | 4 | 8) : SectorSigNoH(bs));
+				curSigH = H(H(H(H(2166136261u, (UINT32)fs->floorheight), (UINT32)fs->ceilingheight), (UINT32)bs->floorheight), (UINT32)bs->ceilingheight);
+				for (const ffloor_t *r = bs->ffloors; r; r = r->next)
+					curSigH = H(H(curSigH, (UINT32)*r->topheight), (UINT32)*r->bottomheight);
+			}
+			else
+			{
+				curSigH = 0;
+				sig = gl_backsector ? SectorSig(gl_frontsector) : SectorSigWall1(gl_frontsector);
+				sig = H(sig, gl_backsector ? SectorSig(gl_backsector) : 0xBAC0u);
+			}
+			sig = SideSig(sig, line->sidedef, false); // without offset (corrected at draw time)
+			if (line->linedef)
+			{
+				sig = H(sig, line->linedef->flags);
+				sig = H(sig, (UINT32)line->linedef->alpha);
+				sig = H(sig, line->linedef->blendmode);
+			}
+			if (mm) { mm->fSig = mF; mm->bSig = mB; mm->sKey = mK; mm->fs = mFs; mm->bs = mBs; mm->sig = sig; mm->sigH = curSigH; mm->simple = curSimple ? 1 : 0; mm->ok = 1; }
+			stMemoMiss++;
+		}
+		curHasOff = (line->sidedef != NULL);
+		curTo = line->sidedef ? line->sidedef->textureoffset : 0;
+		curRo = 0; // horizontal only
+		const UINT64 rrT1 = rre_sub::on ? I_GetPreciseTime() : 0;
+		const boolean usedC = Use(segBase + (size_t)(line - segs), sig);
+		if (rre_sub::on) { const UINT64 rrT2 = I_GetPreciseTime(); rre_sub::sigT[rre_sub::view] += rrT1 - rrT0; rre_sub::useT[rre_sub::view] += rrT2 - rrT1; }
+		if (usedC) { curHasOff = false; curSimple = false; return; }
+		if (rre_sub::on) rre_sub::nMiss[rre_sub::view]++;
+		if (Diag() && IsNeverChg(segBase + (size_t)(line - segs)) && line->sidedef)
+		{
+			const side_t *sd = line->sidedef;
+			const INT32 tx = sd->midtexture ? sd->midtexture : (sd->bottomtexture ? sd->bottomtexture : sd->toptexture);
+			Culp2((UINT32)(gl_frontsector - sectors), (UINT32)tx, 1);
+			// [CULPRIT4]
+			UINT32 cc[14];
+			cc[0] = SectorSig(gl_frontsector);
+			cc[1] = gl_backsector ? SectorSig(gl_backsector) : 0u;
+			cc[2] = SideSig(2166136261u, line->sidedef, false);
+			cc[3] = line->linedef ? H(H(H(2166136261u, line->linedef->flags), (UINT32)line->linedef->alpha), line->linedef->blendmode) : 0u;
+			cc[4] = curSigH;
+			// breakdown: 32 view, 64/128/256/512 front (base, heights, lights, FOFs), 1024..8192 back, same order
+			cc[5] = (UINT32)rre_sub::view;
+			const sector_t *ps[2] = { gl_frontsector, gl_backsector };
+			for (int q = 0; q < 2; q++)
+			{
+				const sector_t *z = ps[q];
+				cc[6 + q*4] = z ? SectorSigRaw(z, 0 | 4) : 0u;
+				cc[7 + q*4] = z ? H(H(2166136261u, (UINT32)z->floorheight), (UINT32)z->ceilingheight) : 0u;
+				cc[8 + q*4] = z ? SectorSigRaw(z, 1 | 4) : 0u;
+				cc[9 + q*4] = z ? SectorSigRaw(z, 2 | 4) : 0u;
+			}
+			Culp4((size_t)(line - segs), (UINT32)(gl_frontsector - sectors), gl_backsector ? (UINT32)(gl_backsector - sectors) : 0xFFFFu, cc);
+		}
+		const UINT64 rrT3 = rre_sub::on ? I_GetPreciseTime() : 0;
+		HWR_ProcessSeg();
+		EndCapture();
+		if (rre_sub::on)
+		{
+			const UINT64 rrD = I_GetPreciseTime() - rrT3;
+			rre_sub::missT[rre_sub::view] += rrD;
+			// diag: which kind of wall is slow in the SKY view (max 24 lines per race)
+			static int slowN = 0;
+			const UINT32 rrUs = (UINT32)(rrD * 1000000 / I_GetPrecisePrecision());
+			if (Diag() && rre_sub::view == 1 && slowN < 24 && rrUs > 500 && line->sidedef && line->linedef)
+			{
+				slowN++;
+				const side_t *sd = line->sidedef;
+				RR_DIAGPRINT("[SLOW] seg=%u us=%u lflags=%X tex t/m/b=%d/%d/%d fs ffl=%d lights=%d bs ffl=%d lights=%d alpha=%d blend=%d\n",
+					(unsigned)(line - segs), (unsigned)rrUs, (unsigned)line->linedef->flags,
+					(int)sd->toptexture, (int)sd->midtexture, (int)sd->bottomtexture,
+					gl_frontsector->ffloors ? 1 : 0, (int)gl_frontsector->numlights,
+					(gl_backsector && gl_backsector->ffloors) ? 1 : 0, gl_backsector ? (int)gl_backsector->numlights : 0,
+					(int)line->linedef->alpha, (int)line->linedef->blendmode);
+			}
+		}
+		if (curSimple) // if what was captured does not match the prediction, do not patch
+		{
+			SItem &ci = items[segBase + (size_t)(line - segs)];
+			if (ci.state == ST_VALID && (ci.kmask != RRE_SimpleMask() || ci.fofMask != RRE_FofMask())) ci.patchOk = 0;
+		}
+		curHasOff = false; curSimple = false; curKind = 0;
+		return;
+	}
+	HWR_ProcessSeg();
+}
+
+// Float version of R_PointToAngle64 (which uses a 64-bit division:
+// slow on weak CPUs). Same result: tantoangle[slope].
+static inline UINT32 RRE_SlopeF(float num, float den)
+{
+	if (den < (512.0f / 65536.0f))
+		return SLOPERANGE;
+	const float a = num * (float)SLOPERANGE / den;
+	return a < (float)SLOPERANGE ? (UINT32)a : SLOPERANGE;
+}
+static inline angle_t RRE_AngF(float x, float y)
+{
+	x -= FIXED_TO_FLOAT(viewx); y -= FIXED_TO_FLOAT(viewy); // same as R_PointToAngle64
+	if (x == 0.0f && y == 0.0f) return 0;
+	if (x >= 0)
+	{
+		if (y >= 0) return (x > y) ? tantoangle[RRE_SlopeF(y, x)] : ANGLE_90 - tantoangle[RRE_SlopeF(x, y)];
+		y = -y;
+		return (x > y) ? 0 - tantoangle[RRE_SlopeF(y, x)] : ANGLE_270 + tantoangle[RRE_SlopeF(x, y)];
+	}
+	x = -x;
+	if (y >= 0) return (x > y) ? ANGLE_180 - tantoangle[RRE_SlopeF(y, x)] : ANGLE_90 + tantoangle[RRE_SlopeF(x, y)];
+	y = -y;
+	return (x > y) ? ANGLE_180 + tantoangle[RRE_SlopeF(y, x)] : ANGLE_270 - tantoangle[RRE_SlopeF(x, y)];
+}
+
 static void HWR_AddLine(seg_t * line)
 {
 	angle_t angle1, angle2;
@@ -2049,14 +3241,30 @@ static void HWR_AddLine(seg_t * line)
 
 	gl_curline = line;
 
-	v1x = FLOAT_TO_FIXED(((polyvertex_t *)gl_curline->pv1)->x);
-	v1y = FLOAT_TO_FIXED(((polyvertex_t *)gl_curline->pv1)->y);
-	v2x = FLOAT_TO_FIXED(((polyvertex_t *)gl_curline->pv2)->x);
-	v2y = FLOAT_TO_FIXED(((polyvertex_t *)gl_curline->pv2)->y);
-
-	// OPTIMIZE: quickly reject orthogonal back sides.
-	angle1 = R_PointToAngle64(v1x, v1y);
-	angle2 = R_PointToAngle64(v2x, v2y);
+	(void)v1x; (void)v1y; (void)v2x; (void)v2y;
+	// Quick backface rejection (side of the seg relative to the camera,
+	// like R_PointOnSegSide) before computing the 2 angles.
+	{
+		const polyvertex_t *a = (polyvertex_t *)gl_curline->pv1, *b = (polyvertex_t *)gl_curline->pv2;
+		const float vx = FIXED_TO_FLOAT(viewx), vy = FIXED_TO_FLOAT(viewy);
+		if ((vy - a->y) * (b->x - a->x) > (b->y - a->y) * (vx - a->x))
+			return;
+	}
+	if (rre_sub::on) rre_sub::nFront[rre_sub::view]++;
+	{
+		// A seg's v1 is usually the previous seg's v2: reuse its angle.
+		static float lx = 0.0f, ly = 0.0f; static angle_t la = 0; static UINT32 lstamp = 0;
+		const polyvertex_t *a = (polyvertex_t *)gl_curline->pv1, *b = (polyvertex_t *)gl_curline->pv2;
+		if (lstamp == rre_seccache::stamp && a->x == lx && a->y == ly)
+		{
+			angle1 = la;
+			if (rre_sub::on) rre_sub::nAngReuse[rre_sub::view]++;
+		}
+		else
+			angle1 = RRE_AngF(a->x, a->y);
+		angle2 = RRE_AngF(b->x, b->y);
+		lx = b->x; ly = b->y; la = angle2; lstamp = rre_seccache::stamp;
+	}
 
 	 // PrBoom: Back side, i.e. backface culling - read: endAngle >= startAngle!
 	if (angle2 - angle1 < ANGLE_180)
@@ -2096,7 +3304,7 @@ static void HWR_AddLine(seg_t * line)
 					|| Tag_Compare(&gl_frontsector->tags, &gl_backsector->tags)))
 				return; // line is empty, don't even bother
 			// treat like wide open window instead
-			HWR_ProcessSeg(); // Doesn't need arguments because they're defined globally :D
+			RRE_ProcessSegCached();
 			return;
 		}
 
@@ -2113,7 +3321,7 @@ static void HWR_AddLine(seg_t * line)
 			return;
 	}
 
-	HWR_ProcessSeg(); // Doesn't need arguments because they're defined globally :D
+	RRE_ProcessSegCached();
 	return;
 }
 
@@ -2149,13 +3357,34 @@ static boolean HWR_CheckBBox(fixed_t *bspcoord)
 	if (boxpos == 5)
 		return true;
 
+	// Skip BSP branches farther than RRE_WORLDDIST
+	// (distance from the closest point of the box to the camera).
+	{
+		// Draw distance, configurable for testing: "dist" test option (e.g. 8192). Default = 12288.
+		static INT32 RRE_WORLDDIST = -1;
+		if (RRE_WORLDDIST < 0)
+		{
+			RRE_WORLDDIST = 12288;
+			{ int v = RRCfg_Int("dist", 0); if (v >= 1024 && v <= 32768) RRE_WORLDDIST = v; }
+			RR_DIAGPRINT("[DIST] draw distance = %d\n", (int)RRE_WORLDDIST);
+		}
+		INT32 vx = dup_viewx >> FRACBITS, vy = dup_viewy >> FRACBITS;
+		INT32 dx = 0, dy = 0;
+		if (vx < (bspcoord[BOXLEFT] >> FRACBITS)) dx = (bspcoord[BOXLEFT] >> FRACBITS) - vx;
+		else if (vx > (bspcoord[BOXRIGHT] >> FRACBITS)) dx = vx - (bspcoord[BOXRIGHT] >> FRACBITS);
+		if (vy < (bspcoord[BOXBOTTOM] >> FRACBITS)) dy = (bspcoord[BOXBOTTOM] >> FRACBITS) - vy;
+		else if (vy > (bspcoord[BOXTOP] >> FRACBITS)) dy = vy - (bspcoord[BOXTOP] >> FRACBITS);
+		if ((INT64)dx * dx + (INT64)dy * dy > (INT64)RRE_WORLDDIST * RRE_WORLDDIST)
+			return false;
+	}
+
 	px1 = bspcoord[checkcoord[boxpos][0]];
 	py1 = bspcoord[checkcoord[boxpos][1]];
 	px2 = bspcoord[checkcoord[boxpos][2]];
 	py2 = bspcoord[checkcoord[boxpos][3]];
 
-	angle1 = R_PointToAngle64(px1, py1);
-	angle2 = R_PointToAngle64(px2, py2);
+	angle1 = RRE_AngF(FIXED_TO_FLOAT(px1), FIXED_TO_FLOAT(py1));
+	angle2 = RRE_AngF(FIXED_TO_FLOAT(px2), FIXED_TO_FLOAT(py2));
 	return gld_clipper_SafeCheckRange(angle2, angle1);
 }
 
@@ -2374,6 +3603,7 @@ static void HWR_RenderPolyObjectPlane(polyobj_t *polysector, boolean isceiling, 
 		blendmode |= PF_ColorMapped;
 	}
 
+	DBG_TINT(&Surf, &blendmode, 255, 255, 0);
 	HWR_ProcessPolygon(&Surf, planeVerts, nrPlaneVerts, blendmode, shader, false);
 }
 
@@ -2455,6 +3685,8 @@ static FBITFIELD HWR_RippleBlend(sector_t *sector, ffloor_t *rover, boolean ceil
 //                  : Draw one or more line segments.
 // Notes            : Sets gl_cursectorlight to the light of the parent sector, to modulate wall textures
 // -----------------+
+
+
 static void HWR_Subsector(size_t num)
 {
 	INT16 count;
@@ -2481,6 +3713,8 @@ static void HWR_Subsector(size_t num)
 		        numsubsectors);*/
 #endif
 
+	if (rre_sub::on) rre_sub::nSubV[rre_sub::view]++;
+	SUB_START();
 	if (num < numsubsectors)
 	{
 		// subsector
@@ -2501,6 +3735,19 @@ static void HWR_Subsector(size_t num)
 		line = NULL;
 	}
 
+	rre_seccache::E *rr_sc = NULL;
+	if (gl_frontsector->heightsec == -1 && gl_frontsector >= sectors && (size_t)(gl_frontsector - sectors) < rre_seccache::e.size())
+	{
+		rr_sc = &rre_seccache::e[gl_frontsector - sectors];
+		if (rr_sc->stamp == rre_seccache::stamp)
+		{
+			floorlightlevel = rr_sc->fll; ceilinglightlevel = rr_sc->cll;
+			floorcolormap = rr_sc->fcm; ceilingcolormap = rr_sc->ccm;
+			cullFloorHeight = rr_sc->cullF; cullCeilingHeight = rr_sc->cullC;
+			locFloorHeight = rr_sc->locF; locCeilingHeight = rr_sc->locC;
+			goto rr_sc_done;
+		}
+	}
 	//SoM: 4/7/2000: Test to make Boom water work in Hardware mode.
 	gl_frontsector = R_FakeFlat(gl_frontsector, &tempsec, &floorlightlevel,
 								&ceilinglightlevel, false);
@@ -2552,16 +3799,26 @@ static void HWR_Subsector(size_t num)
 
 		light = R_GetPlaneLight(gl_frontsector, locFloorHeight, false);
 		if (gl_frontsector->floorlightsec == -1 && !gl_frontsector->floorlightabsolute)
-			floorlightlevel = std::max(0, std::min(255, *gl_frontsector->lightlist[light].lightlevel + gl_frontsector->floorlightlevel));
+			floorlightlevel = std::max<INT32>(0, std::min<INT32>(255, *gl_frontsector->lightlist[light].lightlevel + gl_frontsector->floorlightlevel));
 		floorcolormap = *gl_frontsector->lightlist[light].extra_colormap;
 
 		light = R_GetPlaneLight(gl_frontsector, locCeilingHeight, false);
 		if (gl_frontsector->ceilinglightsec == -1 && !gl_frontsector->ceilinglightabsolute)
-			ceilinglightlevel = std::max(0, std::min(255, *gl_frontsector->lightlist[light].lightlevel + gl_frontsector->ceilinglightlevel));
+			ceilinglightlevel = std::max<INT32>(0, std::min<INT32>(255, *gl_frontsector->lightlist[light].lightlevel + gl_frontsector->ceilinglightlevel));
 		ceilingcolormap = *gl_frontsector->lightlist[light].extra_colormap;
 	}
 
+	if (rr_sc)
+	{
+		rr_sc->stamp = rre_seccache::stamp;
+		rr_sc->fll = floorlightlevel; rr_sc->cll = ceilinglightlevel;
+		rr_sc->fcm = floorcolormap; rr_sc->ccm = ceilingcolormap;
+		rr_sc->cullF = cullFloorHeight; rr_sc->cullC = cullCeilingHeight;
+		rr_sc->locF = locFloorHeight; rr_sc->locC = locCeilingHeight;
+	}
+rr_sc_done:
 	sub->sector->extra_colormap = gl_frontsector->extra_colormap;
+	SUB_MARK(S_FAKE);
 
 	// render floor ?
 #ifdef DOPLANES
@@ -2572,6 +3829,27 @@ static void HWR_Subsector(size_t num)
 		{
 			if (sub->validcount != validcount)
 			{
+				const fixed_t rr_fh = locFloorHeight == cullFloorHeight ? locFloorHeight : gl_frontsector->floorheight;
+				const FBITFIELD rr_fl = PF_Occlude | HWR_RippleBlend(gl_frontsector, NULL, false);
+				UINT32 rr_sig = 0;
+				boolean rr_cached = false;
+				if (num < numsubsectors && rre_static::SectorOk(sub->sector))
+				{
+					using namespace rre_static;
+					if (!gl_frontsector->f_slope && !sub->sector->f_slope) // flat: height kept apart (gets patched)
+					{
+						rr_sig = H(H(H(SectorSigRaw(sub->sector, 0 | 4 | 16), rr_fl), (UINT32)floorlightlevel), (UINT32)(uintptr_t)floorcolormap);
+						curSimple = true; curKind = 6; curSigH = H(2166136261u, (UINT32)rr_fh); curPlaneY = FIXED_TO_FLOAT(rr_fh);
+					}
+					else {
+						rr_sig = H(H(H(H(SectorSigRaw(sub->sector, 0 | 16), gl_frontsector->f_slope ? 0 : (UINT32)rr_fh), rr_fl), (UINT32)floorlightlevel), (UINT32)(uintptr_t)floorcolormap); curSimple = false; curKind = 0; curSigH = 0; } // slope: clear a stale curSigH (left over from another wall/floor, it marked sloped floors as "never")
+					rr_cached = Use(num * 2, rr_sig);
+					if (!rr_cached && Diag() && IsNeverChg(num * 2)) { Culp2((UINT32)(sub->sector - sectors), (UINT32)gl_frontsector->floorpic, 2);
+						Culp3((size_t)num, sub->sector, (INT32)floorlightlevel, floorcolormap, (UINT32)rr_fl, rr_fh, rr_sig, curSigH); }
+					if (rr_cached) { curSimple = false; curKind = 0; curSigH = 0; }
+				}
+				if (!rr_cached)
+				{
 				HWR_GetLevelFlat(&levelflats[gl_frontsector->floorpic], R_NoEncore(gl_frontsector, &levelflats[gl_frontsector->floorpic], false));
 				HWR_RenderPlane(sub, &extrasubsectors[num], false,
 					// Hack to make things continue to work around slopes.
@@ -2579,6 +3857,9 @@ static void HWR_Subsector(size_t num)
 					// We now return you to your regularly scheduled rendering.
 					PF_Occlude | HWR_RippleBlend(gl_frontsector, NULL, false),
 					floorlightlevel, &levelflats[gl_frontsector->floorpic], NULL, 255, floorcolormap);
+				rre_static::EndCapture();
+				rre_static::curSimple = false; rre_static::curKind = 0; rre_static::curSigH = 0;
+				}
 			}
 		}
 		else
@@ -2595,6 +3876,26 @@ static void HWR_Subsector(size_t num)
 		{
 			if (sub->validcount != validcount)
 			{
+				const fixed_t rr_ch = locCeilingHeight == cullCeilingHeight ? locCeilingHeight : gl_frontsector->ceilingheight;
+				const FBITFIELD rr_cl = PF_Occlude | HWR_RippleBlend(gl_frontsector, NULL, true);
+				UINT32 rr_sig = 0;
+				boolean rr_cached = false;
+				if (num < numsubsectors && rre_static::SectorOk(sub->sector))
+				{
+					using namespace rre_static;
+					if (!gl_frontsector->c_slope && !sub->sector->c_slope) // flat: height kept apart (gets patched)
+					{
+						rr_sig = H(H(H(SectorSigRaw(sub->sector, 0 | 4 | 32), rr_cl), (UINT32)ceilinglightlevel), (UINT32)(uintptr_t)ceilingcolormap);
+						curSimple = true; curKind = 6; curSigH = H(2166136261u, (UINT32)rr_ch); curPlaneY = FIXED_TO_FLOAT(rr_ch);
+					}
+					else {
+						rr_sig = H(H(H(H(SectorSigRaw(sub->sector, 0 | 32), gl_frontsector->c_slope ? 0 : (UINT32)rr_ch), rr_cl), (UINT32)ceilinglightlevel), (UINT32)(uintptr_t)ceilingcolormap); curSimple = false; curKind = 0; curSigH = 0; } // slope: clear a stale curSigH (left over from another wall/floor, it marked sloped ceilings as "never")
+					rr_cached = Use(num * 2 + 1, rr_sig);
+					if (!rr_cached && Diag() && IsNeverChg(num * 2 + 1)) Culp2((UINT32)(sub->sector - sectors), (UINT32)gl_frontsector->ceilingpic, 3);
+					if (rr_cached) { curSimple = false; curKind = 0; curSigH = 0; }
+				}
+				if (!rr_cached)
+				{
 				HWR_GetLevelFlat(&levelflats[gl_frontsector->ceilingpic], R_NoEncore(gl_frontsector, &levelflats[gl_frontsector->ceilingpic], true));
 				HWR_RenderPlane(sub, &extrasubsectors[num], true,
 					// Hack to make things continue to work around slopes.
@@ -2602,6 +3903,9 @@ static void HWR_Subsector(size_t num)
 					// We now return you to your regularly scheduled rendering.
 					PF_Occlude | HWR_RippleBlend(gl_frontsector, NULL, true),
 					ceilinglightlevel, &levelflats[gl_frontsector->ceilingpic], NULL, 255, ceilingcolormap);
+				rre_static::EndCapture();
+				rre_static::curSimple = false; rre_static::curKind = 0; rre_static::curSigH = 0;
+				}
 			}
 		}
 		else
@@ -2668,7 +3972,7 @@ static void HWR_Subsector(size_t num)
 										   false,
 					                       *rover->bottomheight,
 					                       *gl_frontsector->lightlist[light].lightlevel,
-										   std::max(0, std::min(rover->alpha, 255)), rover->master->frontsector, blendmode,
+										   std::max<INT32>(0, std::min<INT32>(rover->alpha, 255)), rover->master->frontsector, blendmode,
 					                       false, *gl_frontsector->lightlist[light].extra_colormap);
 				}
 				else
@@ -2716,7 +4020,7 @@ static void HWR_Subsector(size_t num)
 											true,
 					                        *rover->topheight,
 					                        *gl_frontsector->lightlist[light].lightlevel,
-											std::max(0, std::min(rover->alpha, 255)), rover->master->frontsector, blendmode,
+											std::max<INT32>(0, std::min<INT32>(rover->alpha, 255)), rover->master->frontsector, blendmode,
 					                        false, *gl_frontsector->lightlist[light].extra_colormap);
 				}
 				else
@@ -2731,6 +4035,7 @@ static void HWR_Subsector(size_t num)
 	}
 #endif
 #endif //doplanes
+	SUB_MARK(S_PLANES);
 
 	// Draw all the polyobjects in this subsector
 	if (sub->polyList)
@@ -2766,11 +4071,14 @@ static void HWR_Subsector(size_t num)
 // on vient de tracer le sol et le plafond
 // on trace �pr�ent d'abord les sprites et ensuite les murs
 // hurdler: faux: on ajoute seulement les sprites, le murs sont trac� d'abord
+	SUB_MARK(S_POLY);
 	if (line)
 	{
 		// draw sprites first, coz they are clipped to the solidsegs of
 		// subsectors more 'in front'
 		HWR_AddSprites(gl_frontsector);
+		SUB_MARK(S_SPR);
+		if (rre_sub::on) rre_sub::nLinesV[rre_sub::view] += count;
 
 		//Hurdler: at this point validcount must be the same, but is not because
 		//         gl_frontsector doesn't point anymore to sub->sector due to
@@ -2787,6 +4095,7 @@ static void HWR_Subsector(size_t num)
 				HWR_AddLine(line);
 			line++;
 		}
+		SUB_MARK(S_LINES);
 	}
 
 	sub->validcount = validcount;
@@ -2820,6 +4129,61 @@ static boolean HWR_CheckHackBBox(fixed_t *bb)
 
 // BP: big hack for a test in lighning ref : 1249753487AB
 fixed_t *hwbbox;
+
+// In the skybox view only the skybox "room" is walked
+// (sectors connected to the viewpoint's sector), not the whole map.
+namespace rre_skycull {
+	static boolean active = false;
+	static sector_t *cachedSec = NULL;
+	static boolean valid = false;
+	static fixed_t box[4];
+	static std::vector<UINT8> seen;
+	static std::vector<sector_t*> stack;
+	static void Build(sector_t *start)
+	{
+		cachedSec = start; valid = false;
+		if (!start) return;
+		seen.assign(numsectors, 0);
+		stack.clear(); stack.push_back(start); seen[start - sectors] = 1;
+		box[BOXTOP] = box[BOXRIGHT] = INT32_MIN; box[BOXBOTTOM] = box[BOXLEFT] = INT32_MAX;
+		size_t count = 0;
+		while (!stack.empty())
+		{
+			sector_t *sec = stack.back(); stack.pop_back(); count++;
+			for (size_t i = 0; i < sec->linecount; i++)
+			{
+				line_t *ld = sec->lines[i];
+				vertex_t *vs[2] = { ld->v1, ld->v2 };
+				for (int k = 0; k < 2; k++)
+				{
+					if (vs[k]->y > box[BOXTOP]) box[BOXTOP] = vs[k]->y;
+					if (vs[k]->y < box[BOXBOTTOM]) box[BOXBOTTOM] = vs[k]->y;
+					if (vs[k]->x > box[BOXRIGHT]) box[BOXRIGHT] = vs[k]->x;
+					if (vs[k]->x < box[BOXLEFT]) box[BOXLEFT] = vs[k]->x;
+				}
+				sector_t *o = (ld->frontsector == sec) ? ld->backsector : ld->frontsector;
+				if (o && !seen[o - sectors]) { seen[o - sectors] = 1; stack.push_back(o); }
+			}
+		}
+		// If the "room" is almost the whole map, do not cull (safe side).
+		valid = (count < numsectors / 2) && box[BOXTOP] > box[BOXBOTTOM];
+		RR_DIAGPRINT("[SKYCULL] sectors=%u of %u, cull=%s\n", (unsigned)count, (unsigned)numsectors, valid ? "yes" : "no");
+	}
+	static void Begin(player_t *player)
+	{
+		mobj_t *vp = player->skybox.viewpoint;
+		sector_t *sec = (vp && vp->subsector) ? vp->subsector->sector : NULL;
+		if (sec != cachedSec) Build(sec);
+		active = valid;
+	}
+	static inline boolean Outside(const fixed_t *b)
+	{
+		return b[BOXLEFT] > box[BOXRIGHT] || b[BOXRIGHT] < box[BOXLEFT]
+			|| b[BOXBOTTOM] > box[BOXTOP] || b[BOXTOP] < box[BOXBOTTOM];
+	}
+	void LevelReset(void) { cachedSec = NULL; valid = false; active = false; }
+}
+
 
 static void HWR_RenderBSPNode(INT32 bspnum)
 {
@@ -2880,9 +4244,12 @@ static void HWR_RenderBSPNode(INT32 bspnum)
 	hwbbox = bsp->bbox[side];
 
 	// Recursively divide front space.
+	if (!rre_skycull::active || !rre_skycull::Outside(bsp->bbox[side]))
 	HWR_RenderBSPNode(bsp->children[side]);
 
 	// Possibly divide back space.
+	if (rre_skycull::active && rre_skycull::Outside(bsp->bbox[side^1]))
+		return;
 	if (HWR_CheckBBox(bsp->bbox[side^1]))
 	{
 		// BP: big hack for a test in lighning ref : 1249753487AB
@@ -3025,7 +4392,9 @@ static gl_vissprite_t *HWR_NewVisSprite(void)
 	if (gl_visspritecount == MAXVISSPRITES)
 		return &gl_overflowsprite;
 
-	return HWR_GetVisSprite(gl_visspritecount++);
+	gl_vissprite_t *v = HWR_GetVisSprite(gl_visspritecount++);
+	v->rr_roll = 0.0f;
+	return v;
 }
 
 // A hack solution for transparent surfaces appearing on top of linkdraw sprites.
@@ -3260,6 +4629,7 @@ static void HWR_DrawDropShadow(mobj_t *thing, fixed_t scale)
 		blendmode |= PF_ColorMapped;
 	}
 
+	DBG_TINT(&sSurf, &blendmode, 255, 128, 0);
 	HWR_ProcessPolygon(&sSurf, shadowVerts, 4, blendmode|PF_Modulated, shader, false);
 }
 
@@ -3357,7 +4727,7 @@ static void HWR_SplitSprite(gl_vissprite_t *spr)
 	// cache the patch in the graphics card memory
 	//12/12/99: Hurdler: same comment as above (for md2)
 	//Hurdler: 25/04/2000: now support colormap in hardware mode
-	HWR_GetMappedPatch(gpatch, spr->colormap);
+	rre_sprmobj = spr->mobj; HWR_GetMappedPatch(gpatch, spr->colormap); rre_sprmobj = NULL;
 
 	baseWallVerts[0].x = baseWallVerts[3].x = spr->x1;
 	baseWallVerts[2].x = baseWallVerts[1].x = spr->x2;
@@ -3579,7 +4949,7 @@ static void HWR_SplitSprite(gl_vissprite_t *spr)
 
 		Surf.PolyColor.s.alpha = alpha;
 
-		HWR_ProcessPolygon(&Surf, wallVerts, 4, blend|PF_Modulated, shader, false);
+		{ DBG_TINT(&Surf, NULL, 0, 0, 255); HWR_ProcessPolygon(&Surf, wallVerts, 4, blend|PF_Modulated, shader, false); }
 
 		if (use_linkdraw_hack)
 			HWR_LinkDrawHackAdd(wallVerts, spr);
@@ -3608,7 +4978,7 @@ static void HWR_SplitSprite(gl_vissprite_t *spr)
 
 	Surf.PolyColor.s.alpha = alpha;
 
-	HWR_ProcessPolygon(&Surf, wallVerts, 4, blend|PF_Modulated, shader, false);
+	{ DBG_TINT(&Surf, NULL, 0, 0, 255); HWR_ProcessPolygon(&Surf, wallVerts, 4, blend|PF_Modulated, shader, false); }
 
 	if (use_linkdraw_hack)
 		HWR_LinkDrawHackAdd(wallVerts, spr);
@@ -3667,12 +5037,96 @@ static void HWR_DrawBoundingBox(gl_vissprite_t *vis)
 //                  : (monsters, bonuses, weapons, lights, ...)
 // Returns          :
 // -----------------+
+// Floor sprites (boost panels, etc.) in Legacy GL.
+// Software draws them without a z-buffer and they are ALWAYS visible; in GL the floor hid them when the
+// sprite ended up slightly below it. Real case (RR_RobotnikCoaster): panel on floor 394 using
+// the slope of the NEIGHBOURING sector (414) -> part of the panel under the floor.
+// Moves the point up to the real floor (or down to the ceiling if upside down). Only differences < 128 units.
+// Returns true if it moved it.
+static boolean HWR_SplatClampY(FOutVector *v, mobj_t *mo, float zoffset)
+{
+	const float maxfix = 128.0f * FIXED_TO_FLOAT(mapobjectscale);
+	const fixed_t vx = FLOAT_TO_FIXED(v->x), vy = FLOAT_TO_FIXED(v->z);
+	const sector_t *vsec = R_PointInSubsector(vx, vy)->sector;
+	if (!(mo->eflags & MFE_VERTICALFLIP))
+	{
+		const float fz = FIXED_TO_FLOAT(P_GetSectorFloorZAt(vsec, vx, vy)) + zoffset;
+		if (v->y < fz && fz - v->y < maxfix)
+		{
+			v->y = fz;
+			return true;
+		}
+	}
+	else
+	{
+		const float cz = FIXED_TO_FLOAT(P_GetSectorCeilingZAt(vsec, vx, vy)) + zoffset;
+		if (v->y > cz && v->y - cz < maxfix)
+		{
+			v->y = cz;
+			return true;
+		}
+	}
+	return false;
+}
+
+// If the floor under the sprite BENDS (two sectors with different slopes), a single
+// flat quad cuts through it -> flicker (z-fighting). It is drawn as an NxN grid and each
+// point follows the real floor. Returns false if not needed (the normal quad is drawn).
+// Cost: (N+1)^2 subsector lookups per floor sprite.
+static boolean HWR_SplatFollowFloor(FSurfaceInfo *surf, const FOutVector *q, mobj_t *mo, float zoffset, FBITFIELD blend, INT32 shader)
+{
+	enum { N = 8 };
+	FOutVector g[N+1][N+1];
+	boolean moved = false;
+	INT32 a, b;
+
+	// q: 3--2 / 0--1 ; u goes from 0 to 1, w goes from 0 to 3
+	for (a = 0; a <= N; a++)
+	{
+		const float u = (float)a / N;
+		for (b = 0; b <= N; b++)
+		{
+			const float w = (float)b / N;
+			const float k0 = (1.0f - u) * (1.0f - w), k1 = u * (1.0f - w), k2 = u * w, k3 = (1.0f - u) * w;
+			FOutVector *p = &g[a][b];
+			memset(p, 0, sizeof(*p));
+			p->x = k0 * q[0].x + k1 * q[1].x + k2 * q[2].x + k3 * q[3].x;
+			p->y = k0 * q[0].y + k1 * q[1].y + k2 * q[2].y + k3 * q[3].y;
+			p->z = k0 * q[0].z + k1 * q[1].z + k2 * q[2].z + k3 * q[3].z;
+			p->s = k0 * q[0].s + k1 * q[1].s + k2 * q[2].s + k3 * q[3].s;
+			p->t = k0 * q[0].t + k1 * q[1].t + k2 * q[2].t + k3 * q[3].t;
+			if (HWR_SplatClampY(p, mo, zoffset))
+				moved = true;
+		}
+	}
+
+	if (!moved)
+		return false;
+
+	for (a = 0; a < N; a++)
+	{
+		for (b = 0; b < N; b++)
+		{
+			FOutVector cell[4];
+			cell[0] = g[a][b];
+			cell[1] = g[a+1][b];
+			cell[2] = g[a+1][b+1];
+			cell[3] = g[a][b+1];
+			HWR_ProcessPolygon(surf, cell, 4, blend, shader, false);
+		}
+	}
+	return true;
+}
+
 static void HWR_DrawSprite(gl_vissprite_t *spr)
 {
 	FOutVector wallVerts[4];
 	patch_t *gpatch;
 	FSurfaceInfo Surf;
 	const boolean splat = R_ThingIsFloorSprite(spr->mobj);
+	// Floor sprite with its OWN slope (not the floor's), defined on the
+	// object (floorspriteslope): tilted on purpose. Do not stick it to the real floor point by point.
+	boolean splatfree = false;
 
 	if (!spr->mobj)
 		return;
@@ -3800,6 +5254,10 @@ static void HWR_DrawSprite(gl_vissprite_t *spr)
 				splatslope = standingslope;
 		}
 
+		// R_SplatSlope (whip recharge, MT_INSTAWHIP_RECHARGE) is NOT used in GL:
+		// sloped, it showed up as "white pillars" in GL (Software clips it differently). Flat = original GL.
+		splatfree = (splatslope != NULL && splatslope != spr->mobj->standingslope);
+
 		// Set vertical position
 		if (splatslope)
 		{
@@ -3814,6 +5272,11 @@ static void HWR_DrawSprite(gl_vissprite_t *spr)
 			for (i = 0; i < 4; i++)
 				wallVerts[i].y = FIXED_TO_FLOAT(spr->gz) + zoffset;
 		}
+
+		// A floor sprite can never end up BELOW the real floor (see HWR_SplatFollowFloor).
+		if (!splatfree)
+			for (i = 0; i < 4; i++)
+				HWR_SplatClampY(&wallVerts[i], spr->mobj, zoffset);
 	}
 	else
 	{
@@ -3827,12 +5290,33 @@ static void HWR_DrawSprite(gl_vissprite_t *spr)
 		// and the 2d map coords of start/end vertices
 		wallVerts[0].z = wallVerts[3].z = spr->z1;
 		wallVerts[1].z = wallVerts[2].z = spr->z2;
+		if (spr->rr_roll != 0.0f)
+		{
+			// L axis = from x2 towards x1 (left on screen), vertical axis = y
+			float lx = spr->x1 - spr->x2, lz = spr->z1 - spr->z2;
+			const float len = sqrtf(lx * lx + lz * lz);
+			if (len > 0.0001f)
+			{
+				lx /= len; lz /= len;
+				const float c = cosf(spr->rr_roll), sn = sinf(spr->rr_roll);
+				for (INT32 i = 0; i < 4; i++)
+				{
+					const float u = (wallVerts[i].x - spr->rr_px) * lx + (wallVerts[i].z - spr->rr_pz) * lz;
+					const float w = wallVerts[i].y - spr->rr_py;
+					const float u2 = u * c + w * sn;
+					const float w2 = -u * sn + w * c;
+					wallVerts[i].x = spr->rr_px + u2 * lx;
+					wallVerts[i].z = spr->rr_pz + u2 * lz;
+					wallVerts[i].y = spr->rr_py + w2;
+				}
+			}
+		}
 	}
 
 	// cache the patch in the graphics card memory
 	//12/12/99: Hurdler: same comment as above (for md2)
 	//Hurdler: 25/04/2000: now support colormap in hardware mode
-	HWR_GetMappedPatch(gpatch, spr->colormap);
+	rre_sprmobj = spr->mobj; HWR_GetMappedPatch(gpatch, spr->colormap); rre_sprmobj = NULL;
 
 	if (spr->flip)
 	{
@@ -3900,6 +5384,20 @@ static void HWR_DrawSprite(gl_vissprite_t *spr)
 			HWR_ObjectLightLevelPost(spr, sector, &lightlevel, false);
 
 		HWR_Lighting(&Surf, lightlevel, colormap, P_SectorUsesDirectionalLighting(sector) && !R_ThingIsFullBright(spr->mobj));
+		// DIAG [DARK2]: why Sonic shows up black in Sealed Stars
+		if (spr->mobj->player)
+		{
+			static tic_t s_lastOsc = 0;
+			if (gametic - s_lastOsc >= TICRATE)
+			{
+				s_lastOsc = gametic;
+				RR_DIAGPRINT("[DARK2] sector_light=%d final_light=%d lightset=%d dir=%d/%d cmap=%p tint=%08lx fade=%08lx poly=%08lx fstart=%d fend=%d fb=%d\n",
+					sector->lightlevel, lightlevel, (int)lightset, (int)maplighting.directional,
+					(int)P_SectorUsesDirectionalLighting(sector), (void *)colormap,
+					(unsigned long)Surf.TintColor.rgba, (unsigned long)Surf.FadeColor.rgba, (unsigned long)Surf.PolyColor.rgba,
+					(int)Surf.LightInfo.fade_start, (int)Surf.LightInfo.fade_end, (int)R_ThingIsFullBright(spr->mobj));
+			}
+		}
 	}
 
 	{
@@ -3961,6 +5459,12 @@ static void HWR_DrawSprite(gl_vissprite_t *spr)
 			if (!occlusion) use_linkdraw_hack = true;
 		}
 
+		// Floor sprites (boost panels, etc.) with a depth offset.
+		// They were only 0.05 units above the floor: from far away the z-buffer precision is not enough and the floor
+		// hid them (in Software they are always visible). PF_Decal = glPolygonOffset(-1,-1).
+		if (R_ThingIsFloorSprite(spr->mobj))
+			blend |= PF_Decal;
+
 		if (HWR_UseShader())
 		{
 			shader = (R_ThingIsPaperSprite(spr->mobj)
@@ -3970,7 +5474,9 @@ static void HWR_DrawSprite(gl_vissprite_t *spr)
 			blend |= PF_ColorMapped;
 		}
 
-		HWR_ProcessPolygon(&Surf, wallVerts, 4, blend|PF_Modulated, shader, false);
+		{ DBG_TINT(&Surf, NULL, 0, 0, 255);
+			if (!(splat && !splatfree && HWR_SplatFollowFloor(&Surf, wallVerts, spr->mobj, P_MobjFlip(spr->mobj) * 0.05f, blend|PF_Modulated, shader)))
+				HWR_ProcessPolygon(&Surf, wallVerts, 4, blend|PF_Modulated, shader, false); }
 
 		if (use_linkdraw_hack)
 			HWR_LinkDrawHackAdd(wallVerts, spr);
@@ -4024,7 +5530,7 @@ static inline void HWR_DrawPrecipitationSprite(gl_vissprite_t *spr)
 	// cache the patch in the graphics card memory
 	//12/12/99: Hurdler: same comment as above (for md2)
 	//Hurdler: 25/04/2000: now support colormap in hardware mode
-	HWR_GetMappedPatch(gpatch, spr->colormap);
+	rre_sprmobj = spr->mobj; HWR_GetMappedPatch(gpatch, spr->colormap); rre_sprmobj = NULL;
 
 	// colormap test
 	{
@@ -4091,7 +5597,7 @@ static inline void HWR_DrawPrecipitationSprite(gl_vissprite_t *spr)
 		blend |= PF_ColorMapped;
 	}
 
-	HWR_ProcessPolygon(&Surf, wallVerts, 4, blend|PF_Modulated, shader, false);
+	{ DBG_TINT(&Surf, NULL, 0, 0, 255); HWR_ProcessPolygon(&Surf, wallVerts, 4, blend|PF_Modulated, shader, false); }
 }
 #endif
 
@@ -4391,14 +5897,30 @@ static void HWR_CreateDrawNodes(void)
 	// Dump EVERYTHING into a huge drawnode list. Then we'll sort it!
 	// Could this be optimized into _AddTransparentWall/_AddTransparentPlane?
 	// Hell yes! But sort algorithm must be modified to use a linked list.
-	sortnode = (gl_drawnode_t *)Z_Calloc((sizeof(planeinfo_t)*numplanes)
-					+ (sizeof(polyplaneinfo_t)*numpolyplanes)
-					+ (sizeof(wallinfo_t)*numwalls)
-					,PU_STATIC, NULL);
+	// MEMORY: this used to be Z_Calloc + Z_Free EVERY frame (variable size, ~90 KB in
+	// Playground): a big allocation per frame = fragmentation, and it is where Playground
+	// ran out of memory on a 64 MB system. Now a buffer that is reused and only grows (with headroom).
+	{
+		static gl_drawnode_t *s_nodes = NULL;
+		static size_t *s_index = NULL;
+		static size_t s_cap = 0;
+		const size_t need = (size_t)numplanes + numpolyplanes + numwalls;
+		if (need > s_cap || !s_nodes)
+		{
+			const size_t cap = need + need / 4 + 256;
+			if (s_nodes) Z_Free(s_nodes);
+			if (s_index) Z_Free(s_index);
+			s_nodes = (gl_drawnode_t *)Z_Malloc(sizeof(gl_drawnode_t) * cap, PU_STATIC, NULL);
+			s_index = (size_t *)Z_Malloc(sizeof(size_t) * cap, PU_STATIC, NULL);
+			s_cap = cap;
+		}
+		memset(s_nodes, 0, sizeof(gl_drawnode_t) * need);
+		sortnode = s_nodes;
+		sortindex = s_index;
+	}
 	// todo:
 	// However, in reality we shouldn't be re-copying and shifting all this information
 	// that is already lying around. This should all be in some sort of linked list or lists.
-	sortindex = (size_t *)Z_Calloc(sizeof(size_t) * (numplanes + numpolyplanes + numwalls), PU_STATIC, NULL);
 
 	ps_hw_nodesorttime = I_GetPreciseTime();
 
@@ -4500,9 +6022,9 @@ static void HWR_CreateDrawNodes(void)
 	numplanes = 0;
 	numpolyplanes = 0;
 
-	// No mem leaks, please.
-	Z_Free(sortnode);
-	Z_Free(sortindex);
+	// The buffer is reused next frame (no per-frame Z_Free)
+	sortnode = NULL;
+	sortindex = NULL;
 }
 
 // --------------------------------------------------------------------------
@@ -4510,6 +6032,10 @@ static void HWR_CreateDrawNodes(void)
 // --------------------------------------------------------------------------
 
 // added the stransform so they can be switched as drawing happenes so MD2s and sprites are sorted correctly with each other
+// sdraw time per mobj type and for shadows
+static UINT64 rre_sdTypeT[NUMMOBJTYPES];
+static UINT32 rre_sdTypeN[NUMMOBJTYPES];
+static UINT64 rre_sdShadowT = 0;
 static void HWR_DrawSprites(void)
 {
 	UINT32 i;
@@ -4533,10 +6059,13 @@ static void HWR_DrawSprites(void)
 		else
 #endif
 		{
+			const UINT64 rrT0 = I_GetPreciseTime();
 			if (spr->mobj && spr->mobj->shadowscale && cv_shadow.value && !skipshadow)
 			{
 				HWR_DrawDropShadow(spr->mobj, spr->mobj->shadowscale);
 			}
+			const UINT64 rrT1 = I_GetPreciseTime();
+			rre_sdShadowT += rrT1 - rrT0;
 
 			if ((spr->mobj->flags2 & MF2_LINKDRAW) && spr->mobj->tracer)
 			{
@@ -4599,6 +6128,7 @@ static void HWR_DrawSprites(void)
 // During BSP traversal, this adds sprites by sector.
 // --------------------------------------------------------------------------
 static UINT8 sectorlight;
+static UINT32 rre_sprTypeCnt[NUMMOBJTYPES]; // diag: projected sprites per type
 static void HWR_AddSprites(sector_t *sec)
 {
 	mobj_t *thing;
@@ -4626,6 +6156,7 @@ static void HWR_AddSprites(sector_t *sec)
 		{
 			if (R_ThingVisible(thing))
 			{
+				rre_sprTypeCnt[thing->type]++;
 				HWR_ProjectSprite(thing);
 			}
 
@@ -4717,6 +6248,7 @@ static void HWR_ProjectSprite(mobj_t *thing)
 	angle_t spriterotangle = 0;
 	vector2_t visoffs;
 #endif
+	float rr_roll = 0.0f, rr_px = 0.0f, rr_pz = 0.0f, rr_pyoff = 0.0f;
 
 	// uncapped/interpolation
 	interpmobjstate_t interp = {0};
@@ -4808,7 +6340,7 @@ static void HWR_ProjectSprite(mobj_t *thing)
 	{
 		sprdef = &((skin_t *)thing->skin)->sprites[thing->sprite2];
 #ifdef ROTSPRITE
-		sprinfo = &((skin_t *)thing->skin)->sprinfo[thing->sprite2];
+		sprinfo = R_SkinSprInfo((skin_t *)thing->skin, thing->sprite2);
 #endif
 	}
 	else
@@ -4897,7 +6429,13 @@ static void HWR_ProjectSprite(mobj_t *thing)
 	spriterotangle = R_SpriteRotationAngle(thing, NULL);
 
 	if (spriterotangle != 0
-	&& !(splat && !(thing->renderflags & RF_NOSPLATROLLANGLE)))
+	&& !(splat && !(thing->renderflags & RF_NOSPLATROLLANGLE))
+	// Roll is done by rotating the quad on the GPU (see rr_roll).
+	// Rotsprite created a new texture per angle (item boxes: ~1000
+	// uploads when the race starts). It is only kept for sprites
+	// split by lights (HWR_SplitSprite) and flat ones (splat).
+	&& (splat || thing->subsector->sector->numlights)
+	)
 	{
 		rollangle = R_GetRollAngle(papersprite == vflip
 				? spriterotangle : InvAngle(spriterotangle));
@@ -5047,6 +6585,30 @@ static void HWR_ProjectSprite(mobj_t *thing)
 		}
 	*/
 
+		rr_roll = 0.0f;
+		if (spriterotangle != 0 && !rotsprite && !thing->subsector->sector->numlights)
+		{
+			INT32 xpiv, ypiv;
+			const size_t fr = (thing->frame & FF_FRAMEMASK);
+			patch_t *pp = (patch_t *)W_CachePatchNum(sprframe->lumppat[rot], PU_SPRITE);
+			if (in_bit_array(sprinfo->available, fr))
+				xpiv = sprinfo->pivot[fr].x, ypiv = sprinfo->pivot[fr].y;
+			else if (in_bit_array(sprinfo->available, SPRINFO_DEFAULT_PIVOT))
+				xpiv = sprinfo->pivot[SPRINFO_DEFAULT_PIVOT].x, ypiv = sprinfo->pivot[SPRINFO_DEFAULT_PIVOT].y;
+			else
+				xpiv = pp->leftoffset, ypiv = pp->height / 2;
+			// u: distance along (rightcos,rightsin) from the origin
+			float pu = flip ? (x1 - (float)(pp->width - xpiv) * this_xscale)
+			                : (x1 - (float)xpiv * this_xscale);
+			rr_px = tr_x + pu * rightcos;
+			rr_pz = tr_y + pu * rightsin;
+			rr_pyoff = (float)ypiv * this_yscale;
+			// on-screen roll, counter-clockwise (same as rotsprite)
+			float deg = FIXED_TO_FLOAT(AngleFixed(spriterotangle));
+			rr_roll = deg * (float)(M_PIl / 180.0);
+			if (papersprite)
+				rr_roll = -rr_roll;
+		}
 		z1 = tr_y + x1 * rightsin;
 		z2 = tr_y - x2 * rightsin;
 		x1 = tr_x + x1 * rightcos;
@@ -5134,6 +6696,9 @@ static void HWR_ProjectSprite(mobj_t *thing)
 	vis->x2 = x2;
 	vis->z1 = z1;
 	vis->z2 = z2;
+	vis->rr_roll = splat ? 0.0f : rr_roll;
+	vis->rr_px = rr_px; vis->rr_pz = rr_pz;
+	vis->rr_py = vflip ? (gz + rr_pyoff) : (gzt - rr_pyoff);
 
 	vis->tz = tz; // Keep tz for the simple sprite sorting that happens
 	vis->tracertz = tracertz;
@@ -5397,6 +6962,13 @@ static void HWR_ProjectBoundingBox(mobj_t *thing)
 
 static gl_sky_t gl_sky;
 
+// Live API switch: the sky VBO died with the old context -> rebuild it when drawing
+void HWR_SkyContextLost(void)
+{
+	gl_sky.vbo = 0;
+	gl_sky.rebuild = true;
+}
+
 static void HWR_SkyDomeVertex(gl_sky_t *sky, gl_skyvertex_t *vbo, int r, int c, signed char yflip, float delta, boolean foglayer)
 {
 	const float radians = (float)(M_PIl / 180.0f);
@@ -5540,7 +7112,8 @@ static void HWR_DrawSkyBackground(player_t *player)
 {
 	HWD.pfnSetBlend(PF_Translucent|PF_NoDepthTest|PF_Modulated);
 
-	if (cv_glskydome.value)
+	// The dome cost 5-34 ms/frame on slow hardware; always a flat sky (1 quad).
+	if (false)
 	{
 		FTransform dometransform;
 		const float fpov = FIXED_TO_FLOAT(R_FOV(viewssnum)+player->fovadd);
@@ -5662,6 +7235,19 @@ static void HWR_DrawSkyBackground(player_t *player)
 			v[0].t = v[1].t -= ((float) angle / angleturn);
 		}
 
+		// Drawing into the sky texture (bigger than the screen):
+		// stretch the quad (and its coordinates, which are linear) to cover the margins.
+		if (RRE_SkyTexDrawing())
+		{
+			float rw = 240.0f * vid.width / (float)vid.height; if (rw > 400.0f) rw = 400.0f; // 384 (320x200) or 400 (400x240)
+			const float fx = 512.0f / rw, fy = 256.0f / 240.0f;
+			const float cs = (v[0].s + v[1].s) * 0.5f, ct = (v[0].t + v[3].t) * 0.5f;
+			for (int k = 0; k < 4; k++)
+			{
+				v[k].x *= fx; v[k].s = cs + (v[k].s - cs) * fx;
+				v[k].y *= fy; v[k].t = ct + (v[k].t - ct) * fy;
+			}
+		}
 		HWD.pfnUnSetShader();
 		HWD.pfnDrawPolygon(NULL, v, 4, 0);
 	}
@@ -5791,10 +7377,95 @@ static void HWR_SetShaderState(void)
 	HWD.pfnSetShader(SHADER_DEFAULT);
 }
 
+// [DRAW] drawing breakdown by stage. v=0 main view, 1 skybox.
+namespace rre_dib {
+	enum { D_PREP, D_BSP, D_BATCH, D_STATIC, D_SSORT, D_SDRAW, D_NODES, D_END, D_N };
+	static UINT64 acc[2][D_N];
+	static UINT64 accPost = 0, accTotal = 0, accSkyTot = 0;
+	static UINT64 nSpr[2], nTr[2], nBsp[2];
+	static int frames = 0;
+	static UINT64 last;
+	static int cur = 0;
+	static inline void Start(int v) { cur = v; last = I_GetPreciseTime(); }
+	static inline void Mark(int seg) { UINT64 n = I_GetPreciseTime(); acc[cur][seg] += n - last; last = n; }
+	static void Report(void)
+	{
+		const double us = 1000000.0 / (double)I_GetPrecisePrecision() / frames;
+		static const char *nm[D_N] = {"prep","bsp","batch","static","ssort","sdraw","nodes","end"};
+		RR_DIAGPRINT("[DRAW] us/frame total=%.0f skybox=%.0f post=%.0f\n", accTotal*us, accSkyTot*us, accPost*us);
+		{ // top 10 sprite types per frame (both views)
+			char tb[256]; int to = 0;
+			for (int k = 0; k < 10; k++)
+			{
+				int bi = -1; UINT32 bv = 0;
+				for (int t = 0; t < NUMMOBJTYPES; t++) if (rre_sprTypeCnt[t] > bv) { bv = rre_sprTypeCnt[t]; bi = t; }
+				if (bi < 0) break;
+				to += snprintf(tb+to, sizeof(tb)-to, " %d=%.1f", bi, bv/(double)frames);
+				rre_sprTypeCnt[bi] = 0;
+			}
+			RR_DIAGPRINT("[SPRTYPE] mobjtype=sprites/frame:%s\n", tb);
+			memset(rre_sprTypeCnt, 0, sizeof(rre_sprTypeCnt));
+		}
+		{ // sdraw per type (us/frame, draws/frame) + shadows + sprite build/upload
+			char tb[320]; int to = 0;
+			for (int k = 0; k < 8; k++)
+			{
+				int bi = -1; UINT64 bv = 0;
+				for (int t = 0; t < NUMMOBJTYPES; t++) if (rre_sdTypeT[t] > bv) { bv = rre_sdTypeT[t]; bi = t; }
+				if (bi < 0) break;
+				to += snprintf(tb+to, sizeof(tb)-to, " %d=%.0fus/%.1f", bi, bv*us, rre_sdTypeN[bi]/(double)frames);
+				rre_sdTypeT[bi] = 0;
+			}
+			memset(rre_sdTypeT, 0, sizeof(rre_sdTypeT)); memset(rre_sdTypeN, 0, sizeof(rre_sdTypeN));
+			rre_sdShadowT = 0;
+		}
+		for (int v = 0; v < 2; v++)
+		{
+			char buf[256]; int o = 0;
+			for (int i = 0; i < D_N; i++)
+				o += snprintf(buf+o, sizeof(buf)-o, " %s=%.0f", nm[i], acc[v][i]*us);
+			RR_DIAGPRINT("[DRAW] %s:%s | spr=%.0f transl=%.0f bspnodes=%.0f\n", v ? "SKY " : "MAIN", buf,
+				nSpr[v]/(double)frames, nTr[v]/(double)frames, nBsp[v]/(double)frames);
+		}
+		for (int v = 0; v < 2; v++)
+		{
+			using namespace rre_sub;
+			if (!framesV[v]) continue;
+			const double u2 = 1000000.0 / (double)I_GetPrecisePrecision() / framesV[v];
+			UINT64 sum = 0; for (int i = 0; i < S_N; i++) sum += accV[v][i];
+			RR_DIAGPRINT("[SUB] %s bsp=%.0f fakeflat=%.0f planes=%.0f polyobj=%.0f addsprites=%.0f lines=%.0f walk=%.0f | subsect=%.0f segs=%.0f\n",
+				v ? "SKY " : "MAIN", bspTotV[v]*u2, accV[v][S_FAKE]*u2, accV[v][S_PLANES]*u2, accV[v][S_POLY]*u2, accV[v][S_SPR]*u2, accV[v][S_LINES]*u2,
+				((double)bspTotV[v] - (double)sum)*u2, nSubV[v]/(double)framesV[v], nLinesV[v]/(double)framesV[v]);
+			RR_DIAGPRINT("[SUB] %s walls: front=%.0f processed=%.0f uncached=%.0f angle_reused=%.0f process_time=%.0f us\n",
+				v ? "SKY " : "MAIN", nFront[v]/(double)framesV[v], nProc[v]/(double)framesV[v], nMiss[v]/(double)framesV[v],
+				nAngReuse[v]/(double)framesV[v], segT[v]*u2);
+			RR_DIAGPRINT("[SUB] %s wall breakdown: signature=%.0f use_cache=%.0f compute_misses=%.0f rest=%.0f us | memo hit=%d miss=%d (both views)\n",
+				v ? "SKY " : "MAIN", sigT[v]*u2, useT[v]*u2, missT[v]*u2, ((double)segT[v] - (double)sigT[v] - (double)useT[v] - (double)missT[v])*u2,
+				rre_static::stMemoHit, rre_static::stMemoMiss);
+		}
+		memset(rre_sub::sigT, 0, sizeof(rre_sub::sigT)); memset(rre_sub::useT, 0, sizeof(rre_sub::useT)); memset(rre_sub::missT, 0, sizeof(rre_sub::missT)); rre_static::stMemoHit = rre_static::stMemoMiss = 0;
+		{
+			const double u3 = 1000000.0 / (double)I_GetPrecisePrecision() / frames;
+			RR_DIAGPRINT("[DRAW] sky(background) MAIN=%.0f SKY=%.0f us/frame\n", rre_sub::skyBgV[0]*u3, rre_sub::skyBgV[1]*u3);
+		}
+		memset(rre_sub::accV, 0, sizeof(rre_sub::accV)); memset(rre_sub::nSubV, 0, sizeof(rre_sub::nSubV));
+		memset(rre_sub::nLinesV, 0, sizeof(rre_sub::nLinesV)); memset(rre_sub::bspTotV, 0, sizeof(rre_sub::bspTotV));
+		memset(rre_sub::skyBgV, 0, sizeof(rre_sub::skyBgV)); memset(rre_sub::framesV, 0, sizeof(rre_sub::framesV)); memset(rre_sub::segT, 0, sizeof(rre_sub::segT)); memset(rre_sub::nFront, 0, sizeof(rre_sub::nFront));
+		memset(rre_sub::nProc, 0, sizeof(rre_sub::nProc)); memset(rre_sub::nMiss, 0, sizeof(rre_sub::nMiss)); memset(rre_sub::nAngReuse, 0, sizeof(rre_sub::nAngReuse));
+		RR_DIAGPRINT("[DRAW] skybox: cv=%d viewpoint=%d drawsky=%d\n", (int)cv_skybox.value,
+			(int)(players[displayplayers[0]].skybox.viewpoint != NULL), (int)drawsky);
+		memset(acc, 0, sizeof(acc)); memset(nSpr,0,sizeof(nSpr)); memset(nTr,0,sizeof(nTr)); memset(nBsp,0,sizeof(nBsp));
+		accPost = accTotal = accSkyTot = 0; frames = 0;
+	}
+}
+#define DIB_START(v) rre_dib::Start(v)
+#define DIB_MARK(s) rre_dib::Mark(rre_dib::s)
+
 static void HWR_RenderViewpoint(player_t *player, boolean drawSkyTexture, boolean timing)
 {
 	const float fpov = FIXED_TO_FLOAT(R_FOV(viewssnum)+player->fovadd);
 	postimg_t *type = &postimgtype[viewssnum];
+	DIB_START(timing ? 0 : 1);
 
 	{
 		// do we really need to save player (is it not the same)?
@@ -5860,7 +7531,11 @@ static void HWR_RenderViewpoint(player_t *player, boolean drawSkyTexture, boolea
 	HWR_ClearView(); // Clears the depth buffer and resets the view I believe
 
 	if (drawSkyTexture)
+	{
+		const UINT64 sk0 = I_GetPreciseTime();
 		HWR_DrawSkyBackground(player);
+		rre_sub::skyBgV[timing ? 0 : 1] += I_GetPreciseTime() - sk0;
+	}
 
 	//Hurdler: it doesn't work in splitscreen mode
 	drawsky = r_splitscreen;
@@ -5872,6 +7547,9 @@ static void HWR_RenderViewpoint(player_t *player, boolean drawSkyTexture, boolea
 	{
 		angle_t a1 = gld_FrustumAngle(gl_aimingangle);
 		gld_clipper_Clear();
+		// In the sky texture, the cull is a bit wider (margins ~+8 degrees per side).
+		// Without culling it cost ~3x (Sealed Star: skybox 16-19 ms).
+		if (RRE_SkyTexDrawing()) { const angle_t ex = a1 + ANG1 * 12; if (ex > a1 && ex < ANGLE_180) a1 = ex; }
 		gld_clipper_SafeAddClipRange(viewangle + a1, viewangle - a1);
 #ifdef HAVE_SPHEREFRUSTRUM
 		gld_FrustrumSetup();
@@ -5881,6 +7559,7 @@ static void HWR_RenderViewpoint(player_t *player, boolean drawSkyTexture, boolea
 	//04/01/2000: Hurdler: added for T&L
 	//                     Actually it only works on Walls and Planes
 	HWD.pfnSetTransform(&atransform);
+	if (timing && rre_skyQuad) RRE_SkyTexDraw(); // the stored sky, behind everything
 
 	// Reset the shader state.
 	HWR_SetShaderState();
@@ -5896,8 +7575,22 @@ static void HWR_RenderViewpoint(player_t *player, boolean drawSkyTexture, boolea
 
 	if (cv_glbatching.value)
 		HWR_StartBatching();
+	DIB_MARK(D_PREP);
 
+	RRE_StaticFrameBegin();
+	rre_sub::view = timing ? 0 : 1;
+	if (timing) rre_sub::frameNo++;
+	rre_sub::on = rre_static::Diag() && ((rre_sub::frameNo & 3) == 0);
+	const UINT64 subT0 = I_GetPreciseTime();
+	rre_seccache::stamp++;
+	if (timing && rre_static::Diag()) rre_chg::Tick();
 	HWR_RenderBSPNode((INT32)numnodes-1);
+	if (rre_sub::on)
+	{
+		rre_sub::bspTotV[rre_sub::view] += I_GetPreciseTime() - subT0;
+		rre_sub::framesV[rre_sub::view]++;
+		rre_sub::on = 0;
+	}
 
 #ifdef HWPRECIP
 	HWR_AddPrecipitationSprites();
@@ -5908,8 +7601,13 @@ static void HWR_RenderViewpoint(player_t *player, boolean drawSkyTexture, boolea
 		ps_bsptime = I_GetPreciseTime() - ps_bsptime;
 	}
 
+	DIB_MARK(D_BSP);
+	if (timing) rre_dib::nBsp[0] += ps_numbspcalls;
 	if (cv_glbatching.value)
 		HWR_RenderBatches();
+	DIB_MARK(D_BATCH);
+	RRE_StaticFrameDraw();
+	DIB_MARK(D_STATIC);
 
 #ifdef ALAM_LIGHTING
 	//14/11/99: Hurdler: moved here because it doesn't work with
@@ -5926,6 +7624,7 @@ static void HWR_RenderViewpoint(player_t *player, boolean drawSkyTexture, boolea
 	}
 
 	HWR_SortVisSprites();
+	DIB_MARK(D_SSORT);
 
 	if (timing)
 	{
@@ -5933,7 +7632,10 @@ static void HWR_RenderViewpoint(player_t *player, boolean drawSkyTexture, boolea
 		ps_hw_spritedrawtime = I_GetPreciseTime();
 	}
 
+	rre_dib::nSpr[rre_dib::cur] += gl_visspritecount;
+	rre_dib::nTr[rre_dib::cur] += numplanes + numpolyplanes + numwalls;
 	HWR_DrawSprites();
+	DIB_MARK(D_SDRAW);
 
 	if (timing)
 	{
@@ -5956,6 +7658,7 @@ static void HWR_RenderViewpoint(player_t *player, boolean drawSkyTexture, boolea
 	{
 		HWR_CreateDrawNodes();
 	}
+	DIB_MARK(D_NODES);
 
 	HWD.pfnSetTransform(NULL);
 	HWD.pfnUnSetShader();
@@ -5963,6 +7666,7 @@ static void HWR_RenderViewpoint(player_t *player, boolean drawSkyTexture, boolea
 	// added by Hurdler for correct splitscreen
 	// moved here by hurdler so it works with the new near clipping plane
 	HWD.pfnGClipRect(0, 0, vid.width, vid.height, NZCLIP_PLANE);
+	DIB_MARK(D_END);
 }
 
 // ==========================================================================
@@ -5973,7 +7677,9 @@ void HWR_RenderSkyboxView(player_t *player)
 	// note: sets viewangle, viewx, viewy, viewz
 	R_SkyboxFrame(viewssnum);
 
+	rre_skycull::Begin(player);
 	HWR_RenderViewpoint(player, drawsky, false);
+	rre_skycull::active = false;
 }
 
 // ==========================================================================
@@ -5993,6 +7699,7 @@ static void HWR_RollTransform(FTransform *tr, angle_t roll)
 
 void HWR_RenderPlayerView(void)
 {
+	const UINT64 dibT0 = I_GetPreciseTime();
 	HWD.pfnResetRenderState();
 
 	player_t * player = &players[displayplayers[viewssnum]];
@@ -6023,9 +7730,42 @@ void HWR_RenderPlayerView(void)
 		HWD.pfnClearBuffer(true, false, &ClearColor); // Clear the Color Buffer, stops HOMs. Also seems to fix the skybox issue on Intel GPUs.
 
 	ps_hw_skyboxtime = I_GetPreciseTime();
-	if (skybox && drawsky) // If there's a skybox and we should be drawing the sky, draw the skybox
-		HWR_RenderSkyboxView(player); // This is drawn before everything else so it is placed behind
+	// The skybox is drawn into a texture at most 1 in 3 frames
+	// (or sooner when turning a lot) and the other frames reuse it, shifted.
+	rre_skyQuad = false;
+	if (skybox && drawsky)
+	{
+		static int skyAge = 99;
+		static INT32 skyMap = -1;
+		if (gamemap != skyMap) { skyMap = gamemap; RRE_SkyTexInvalidate(); skyAge = 99; }
+		if (RRE_SkyTexOn() && r_splitscreen == 0)
+		{
+			if (skyAge >= 2 || RRE_SkyTexNeedRedraw())
+			{
+				if (RRE_SkyTexBegin())
+				{
+					HWR_RenderSkyboxView(player);
+					RRE_SkyTexEnd();
+					skyAge = 0; rre_skyDrawn++;
+					rre_skyQuad = true;
+				}
+				else
+					HWR_RenderSkyboxView(player);
+			}
+			else { skyAge++; rre_skyReused++; rre_skyQuad = true; }
+		}
+		else
+			HWR_RenderSkyboxView(player);
+		if (rre_skyDrawn + rre_skyReused >= 90)
+		{
+			int w0, w1, w2; float ox, oy; RRE_SkyTexWhy(&w0, &w1, &w2, &ox, &oy);
+			RR_DIAGPRINT("[SKYTEX] 90 frames: drawn=%d reused=%d | why: no_data=%d behind=%d turn=%d | last shift=%.3f,%.3f\n",
+				rre_skyDrawn, rre_skyReused, w0, w1, w2, ox, oy);
+			rre_skyDrawn = rre_skyReused = 0;
+		}
+	}
 	ps_hw_skyboxtime = I_GetPreciseTime() - ps_hw_skyboxtime;
+	rre_dib::accSkyTot += ps_hw_skyboxtime;
 
 	// note: sets viewangle, viewx, viewy, viewz
 	R_SetupFrame(viewssnum);
@@ -6035,7 +7775,15 @@ void HWR_RenderPlayerView(void)
 			!skybox && drawsky, // Don't draw the regular sky if there's a skybox
 			true); // Main view is profiled
 
+	const UINT64 dibP0 = I_GetPreciseTime();
 	HWR_DoPostProcessor(player);
+	{
+		const UINT64 n = I_GetPreciseTime();
+		rre_dib::accPost += n - dibP0;
+		rre_dib::accTotal += n - dibT0;
+		if (viewssnum == 0 && ++rre_dib::frames >= 30)
+			rre_dib::Report();
+	}
 }
 
 void HWR_LoadLevel(void)
@@ -6046,10 +7794,40 @@ void HWR_LoadLevel(void)
 #endif
 
 	HWR_CreatePlanePolygons((INT32)numnodes - 1);
+	RRE_StaticLevelInit();
+	rre_skycull::LevelReset();
+	rre_seccache::LevelReset();
 
 	// Build the sky dome
 	HWR_ClearSkyDome();
 	HWR_BuildSkyDome();
+
+	// Preload the track's textures in GL (Software already does it with R_PrecacheLevel,
+	// GL did not). Without this every wall/floor was converted and uploaded the first time it was seen: fps drop
+	// during the first seconds (RR_SealedStarBalconies: 20-25 ms/frame at the start).
+	{
+		const precise_t t0 = I_GetPreciseTime();
+		size_t i;
+		if (skytexture > 0 && skytexture < numtextures)
+			HWR_GetTexture(texturetranslation[skytexture], skytexture);
+		for (i = 0; i < numsides; i++)
+		{
+			const INT32 base[3] = { sides[i].toptexture, sides[i].midtexture, sides[i].bottomtexture };
+			for (INT32 k = 0; k < 3; k++)
+				if (base[k] > 0 && base[k] < numtextures)
+					HWR_GetTexture(R_GetTextureNum(base[k]), base[k]);
+		}
+		for (i = 0; i < numsectors; i++)
+		{
+			sector_t *sec = &sectors[i];
+			if (sec->floorpic >= 0 && (size_t)sec->floorpic < numlevelflats)
+				HWR_GetLevelFlat(&levelflats[sec->floorpic], R_NoEncore(sec, &levelflats[sec->floorpic], false));
+			if (sec->ceilingpic >= 0 && (size_t)sec->ceilingpic < numlevelflats)
+				HWR_GetLevelFlat(&levelflats[sec->ceilingpic], R_NoEncore(sec, &levelflats[sec->ceilingpic], true));
+		}
+		I_OutputMsg("[PRELOAD] GL track textures: %.0f ms\n",
+			(double)(I_GetPreciseTime() - t0) * 1000.0 / (double)I_GetPrecisePrecision());
+	}
 
 	gl_maploaded = true;
 }
@@ -6194,6 +7972,7 @@ void transform(float *cx, float *cy, float *cz)
 
 void HWR_AddTransparentWall(FOutVector *wallVerts, FSurfaceInfo *pSurf, INT32 texnum, INT32 basetexnum, FBITFIELD blend, boolean fogwall, INT32 lightlevel, extracolormap_t *wallcolormap)
 {
+	rre_static::Never(); // side effect: cannot be cached
 	static size_t allocedwalls = 0;
 
 	// Force realloc if buffer has been freed
@@ -6247,6 +8026,7 @@ void HWR_RenderWall(FOutVector *wallVerts, FSurfaceInfo *pSurf, FBITFIELD blend,
 		blendmode |= PF_Fog;
 
 	blendmode |= PF_Modulated;	// No PF_Occlude means overlapping (incorrect) transparency
+	DBG_TINT(pSurf, &blendmode, 0, 160, 0);
 	HWR_ProcessPolygon(pSurf, wallVerts, 4, blendmode, shader, false);
 }
 
@@ -6286,8 +8066,10 @@ void HWR_DoPostProcessor(player_t *player)
 		HWD.pfnDrawPolygon(&Surf, v, 4, PF_Modulated|PF_Additive|PF_NoTexture|PF_NoDepthTest);
 	}
 
-	// Capture the screen for intermission and screen waving
-	if(gamestate != GS_INTERMISSION)
+	// Ring Racers E: only with a water/heat effect in this view: that is the only user of the texture
+	// (PostImgRedraw, same frame); HWR_DrawIntermissionBG is never called in Ring Racers. Copying the screen
+	// every frame cost 1-17 ms with ANGLE (the CPU waits for the GPU) and some time on every API.
+	if (gamestate != GS_INTERMISSION && !r_splitscreen && (*type == postimg_water || *type == postimg_heat))
 		HWD.pfnMakeScreenTexture();
 
 	if (r_splitscreen) // Not supported in splitscreen - someone want to add support?

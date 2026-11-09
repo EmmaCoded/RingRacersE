@@ -1460,7 +1460,6 @@ static void R_ParseSpriteInfoSkin(struct ParseSpriteInfoState *parser)
 static void copy_to_skin (struct ParseSpriteInfoState *parser, INT32 skinnum)
 {
 	skin_t *skin = skins[skinnum];
-	spriteinfo_t *sprinfo = skin->sprinfo;
 
 	if (parser->any)
 	{
@@ -1468,12 +1467,16 @@ static void copy_to_skin (struct ParseSpriteInfoState *parser, INT32 skinnum)
 
 		for (spr2num = 0; spr2num < NUMPLAYERSPRITES; ++spr2num)
 		{
-			M_Memcpy(&sprinfo[spr2num], parser->info, sizeof(spriteinfo_t));
+			if (!skin->sprinfo[spr2num])
+				skin->sprinfo[spr2num] = Z_Calloc(sizeof(spriteinfo_t), PU_STATIC, NULL);
+			M_Memcpy(skin->sprinfo[spr2num], parser->info, sizeof(spriteinfo_t));
 		}
 	}
 	else
 	{
-		M_Memcpy(&sprinfo[parser->spr2num], parser->info, sizeof(spriteinfo_t));
+		if (!skin->sprinfo[parser->spr2num])
+			skin->sprinfo[parser->spr2num] = Z_Calloc(sizeof(spriteinfo_t), PU_STATIC, NULL);
+		M_Memcpy(skin->sprinfo[parser->spr2num], parser->info, sizeof(spriteinfo_t));
 	}
 }
 

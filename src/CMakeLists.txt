@@ -398,6 +398,10 @@ if(SRB2_CONFIG_ENABLE_WEBM_MOVIES)
 endif()
 
 target_link_libraries(SRB2SDL2 PRIVATE nlohmann_json::nlohmann_json)
+if(RRE_STATIC_DEPS AND MINGW)
+	target_compile_definitions(SRB2SDL2 PRIVATE CURL_STATICLIB)
+	target_link_libraries(SRB2SDL2 PRIVATE ${RRE_STATIC_LIBS})
+endif()
 
 set(SRB2_HAVE_THREADS ON)
 target_compile_definitions(SRB2SDL2 PRIVATE -DHAVE_THREADS)

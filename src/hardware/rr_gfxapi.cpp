@@ -3,6 +3,7 @@
 // Every graphics DLL is loaded dynamically.
 #include <cstdio> // fopen (vkconfig warning)
 #include "rr_gfxapi.h"
+#include "rr_gfxpack.h"
 
 extern "C" void CONS_Printf(const char *fmt, ...);
 
@@ -78,10 +79,32 @@ static int file_exists(const char *dir, const char *name)
 	return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
 }
 
-int RRGfx_MesaAvailable(void)
+static int angle_dir(char *out, int n);
+
+// The folder next to the exe (angle\ or mesa\) wins when it has the group's main DLL;
+// otherwise the copy embedded in the exe is used (rr_gfxpack.cpp).
+static int local_dir(const char *group, char *out, int n)
+{
+	if (!strcmp(group, "mesa") ? !mesa_dir(out, n) : !angle_dir(out, n))
+		return 0;
+	return file_exists(out, !strcmp(group, "mesa") ? "opengl32.dll" : "libEGL.dll");
+}
+
+static int gfx_has(const char *group, const char *name)
 {
 	char d[MAX_PATH];
-	return mesa_dir(d, MAX_PATH) && file_exists(d, "opengl32.dll") && file_exists(d, "libgallium_wgl.dll");
+	return local_dir(group, d, MAX_PATH) ? file_exists(d, name) : RRPack_Has(group, name);
+}
+
+// Folder to load the group's DLLs from (writes the embedded copy the first time)
+static int gfx_dir(const char *group, char *out, int n)
+{
+	return local_dir(group, out, n) || RRPack_Extract(group, out, n);
+}
+
+int RRGfx_MesaAvailable(void)
+{
+	return gfx_has("mesa", "opengl32.dll") && gfx_has("mesa", "libgallium_wgl.dll");
 }
 
 static int s_mesa_driver = -1; // driver Mesa was started with in this process (RRGFX_DX12 / RRGFX_VULKAN)
@@ -89,7 +112,7 @@ const char *RRGfx_MesaPrepare(int api)
 {
 	static char gl[MAX_PATH + 32];
 	char d[MAX_PATH];
-	if (!RRGfx_IsMesa(api) || !RRGfx_MesaAvailable() || !mesa_dir(d, MAX_PATH))
+	if (!RRGfx_IsMesa(api) || !RRGfx_MesaAvailable() || !gfx_dir("mesa", d, MAX_PATH))
 		return NULL;
 	// Mesa's opengl32.dll loads libgallium_wgl.dll and dxil.dll by name: look for them in the mesa folder
 	SetDllDirectoryA(d);
@@ -207,15 +230,13 @@ static int angle_dir(char *out, int n)
 
 int RRGfx_AngleAvailable(void)
 {
-	char d[MAX_PATH];
-	return angle_dir(d, MAX_PATH) && file_exists(d, "libEGL.dll") && file_exists(d, "libGLESv2.dll");
+	return gfx_has("angle", "libEGL.dll") && gfx_has("angle", "libGLESv2.dll");
 }
 
 // Chrome's ANGLE has a Vulkan backend; with the system vulkan-1.dll it failed (Internal Vulkan error -3)
 int RRGfx_AngleVulkanAvailable(void)
 {
-	char d[MAX_PATH];
-	return RRGfx_AngleAvailable() && angle_dir(d, MAX_PATH) && file_exists(d, "vulkan-1.dll");
+	return RRGfx_AngleAvailable() && gfx_has("angle", "vulkan-1.dll");
 }
 
 static void rr_vk_no_validation(void);
@@ -223,7 +244,7 @@ void RRGfx_VkHideUserSettings(int hide); // defined next to probe_vulkan
 int RRGfx_AnglePrepare(int api)
 {
 	char d[MAX_PATH], p[MAX_PATH + 32];
-	if (!RRGfx_AngleAvailable() || !angle_dir(d, MAX_PATH))
+	if (!RRGfx_AngleAvailable() || !gfx_dir("angle", d, MAX_PATH))
 		return 0;
 	// libGLESv2.dll loads its DLLs (vulkan-1.dll...) by name: look for them in the angle folder
 	rr_vk_no_validation(); // before ANGLE loads vulkan-1.dll

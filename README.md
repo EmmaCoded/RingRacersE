@@ -24,9 +24,9 @@ Video > Advanced > **Rendering Backend...** shows a list with every renderer you
 | OpenGL | Official Legacy GL renderer | 3D models and shaders |
 | Direct3D 9 | New Direct3D 9 backend | Software mode only |
 | Direct3DEx 9 | Same backend, using Direct3D 9Ex | Software mode only |
-| DirectX 11 | Legacy GL translated to Direct3D 11 by [ANGLE](https://chromium.googlesource.com/angle/angle) | 3D models and shaders; needs the `angle/` folder |
-| Vulkan | Legacy GL translated to Vulkan by ANGLE | 3D models and shaders; needs the `angle/` folder |
-| DirectX 12 | Legacy GL translated to Direct3D 12 by [Mesa](https://www.mesa3d.org/) | 3D models and shaders; needs the `mesa/` folder; 64-bit only |
+| DirectX 11 | Legacy GL translated to Direct3D 11 by [ANGLE](https://chromium.googlesource.com/angle/angle) | 3D models and shaders; ANGLE is inside the release `.exe` |
+| Vulkan | Legacy GL translated to Vulkan by ANGLE | 3D models and shaders; ANGLE is inside the release `.exe` |
+| DirectX 12 | Legacy GL translated to Direct3D 12 by [Mesa](https://www.mesa3d.org/) | 3D models and shaders; Mesa is inside the release `.exe`; 64-bit only |
 
 - **Live switching:** changing the renderer does not restart the game. The new window opens where the old one was.
 - Mesa is never unloaded once it has been loaded (unloading it caused a crash a few seconds later), so after using DirectX 12 the game may ask for a restart.
@@ -61,7 +61,7 @@ In netgames, the host decides: if the host uses Low-End Mode, every player uses 
 
 ## Download
 
-Windows 64-bit builds are on the [Releases](https://github.com/EmmaCoded/RingRacersE/releases) page. Copy the files into your Ring Racers 2.4 folder and run `RingRacersE.exe`.
+Builds for Windows (64-bit) and Linux are on the [Releases](https://github.com/EmmaCoded/RingRacersE/releases) page. On Windows the download is a single `RingRacersE.exe` (plus license files): put it in your Ring Racers 2.4 folder and run it. See [Installing](https://github.com/EmmaCoded/RingRacersE/wiki/Installing) for Linux and the minimum requirements.
 
 ## Documentation
 
@@ -81,13 +81,18 @@ Ring Racers E is built with [MSYS2](https://www.msys2.org/), CMake and Ninja.
 
 Optional: to embed `d3dcompiler_47.dll` (needed by Direct3D 9 on Windows 7), put `d3dcompiler_47_x64.dll` and/or `d3dcompiler_47_x86.dll` from the Windows SDK redistributables in the `embed/` folder (or point `-DRRE_EMBED_DIR=` to another folder). If the file is missing, nothing is embedded and the game uses the system copy.
 
-Copy the DLLs the executable needs from the MSYS2 `bin` folder next to it (`ldd RingRacersE.exe` lists them).
+Copy the DLLs the executable needs from the MSYS2 `bin` folder next to it (`ldd RingRacersE.exe` lists them), or add `-DRRE_STATIC_DEPS=ON` to link SDL2, curl, libpng, zlib and Opus statically (that is how the release `.exe` is built: no DLLs needed).
 
 The official build instructions (vcpkg and CMake presets, Linux libraries) are in the [official README](https://github.com/KartKrewDev/RingRacers/tree/49beb6b74bce839f414b6ea9ad655f4a0c72a801#building-from-source). On Linux, only the Software and OpenGL renderers are available.
 
-### Optional folders: `angle/` and `mesa/`
+### ANGLE and Mesa (DirectX 11, Vulkan, DirectX 12)
 
-These DLLs are **not** part of this repository. Put the folders next to the executable:
+These DLLs are **not** part of this repository. There are two ways to use them (64-bit only):
+
+- **Embedded (release builds):** put the folders below inside `RRE_EMBED_DIR` (`embed/angle/` and `embed/mesa/`). CMake compresses them into the executable, and the game writes them to `%LOCALAPPDATA%\RingRacersE\` the first time DirectX 11, Vulkan or DirectX 12 is used (`src/hardware/rr_gfxpack.cpp`).
+- **Folders next to the executable:** `angle/` and `mesa/`. If they exist, they are used instead of the embedded copy.
+
+The files:
 
 - `angle/` (DirectX 11 and Vulkan): `libEGL.dll`, `libGLESv2.dll` and `vulkan-1.dll` from a recent ANGLE build with the Vulkan backend (for example, the ones shipped with Google Chrome), plus their license files. The `mingw-w64-ucrt-x86_64-angleproject` MSYS2 package also works, for DirectX 11 only.
 - `mesa/` (DirectX 12): `opengl32.dll`, `libgallium_wgl.dll` and `dxil.dll` from [mesa-dist-win](https://github.com/pal1000/mesa-dist-win) (release-mingw, 64-bit).

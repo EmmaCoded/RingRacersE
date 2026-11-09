@@ -58,10 +58,14 @@ if("${CMAKE_SYSTEM_NAME}" MATCHES Darwin)
 	)
 endif()
 
-target_link_libraries(SRB2SDL2
-	PRIVATE
-	$<IF:$<TARGET_EXISTS:SDL2::SDL2>,SDL2::SDL2,SDL2::SDL2-static>
-)
+if(RRE_STATIC_DEPS AND MINGW AND TARGET SDL2::SDL2-static)
+	target_link_libraries(SRB2SDL2 PRIVATE SDL2::SDL2-static)
+else()
+	target_link_libraries(SRB2SDL2
+		PRIVATE
+		$<IF:$<TARGET_EXISTS:SDL2::SDL2>,SDL2::SDL2,SDL2::SDL2-static>
+	)
+endif()
 
 if("${CMAKE_SYSTEM_NAME}" MATCHES Linux)
 	target_link_libraries(SRB2SDL2 PRIVATE m rt)

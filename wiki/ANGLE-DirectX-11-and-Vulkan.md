@@ -87,6 +87,17 @@ Players cannot be expected to fix their vkconfig, so the game protects itself (`
   variables.
 - `-vkvalidation` leaves everything as it is, for developers who want the layer.
 
+### Only one Vulkan loader
+
+The API probe loads the system `vulkan-1.dll` to check if Vulkan works, and ANGLE then loads its own copy from its
+folder. The probe now unloads the system copy when it is done. With both loaded, RivaTuner's Vulkan hooks
+(`RTSSHooks64.dll`) crashed the AMD driver when the Vulkan window was created.
+
+### Sky dome
+
+With ANGLE the Legacy GL sky dome turned all the 3D black, so the sky is always flat on DirectX 11 and Vulkan.
+See [Legacy GL changes](Legacy-GL-Changes.md).
+
 ## Live switching
 
 Before the ES context is destroyed, the emulation forgets its programs, cached state and the real function

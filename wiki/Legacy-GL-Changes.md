@@ -32,6 +32,8 @@ a replay and as soon as the option is changed (`RRE_GLLOWEND`). With Low-End Mod
 | Change | Why |
 |---|---|
 | **Floor sprites on slopes:** see [Small fixes](Small-Fixes.md#floor-sprites-on-slopes). | They were partly hidden under the floor. |
+| **Fog blocks fade like Software:** what is behind a fog block now fades towards the fog colour by its light level (`destination * (1 - d) + fog * d`), with and without shaders. The fog shader in `r_opengl.cpp` outputs the fog colour premultiplied and `1 - d` as alpha, and fog is blended as `GL_ONE, GL_SRC_ALPHA` (it was `GL_SRC_ALPHA, GL_SRC_COLOR`). | The lit colour of the block was added on top of the picture. The title screen fades its background in with a black fog block whose light goes up, and in Legacy GL it showed a grey veil for about a second, then jumped to the right colours. The official 2.4 does the same. |
+| **Flat sky with ANGLE:** with DirectX 11 and Vulkan the sky is always flat, even with Low-End Mode off. | With ANGLE the sky dome turned all the 3D black (only the HUD was visible). |
 
 For the original code, see
 [`hw_main.cpp` at 49beb6b](https://github.com/KartKrewDev/RingRacers/blob/49beb6b74bce839f414b6ea9ad655f4a0c72a801/src/hardware/hw_main.cpp).

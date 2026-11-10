@@ -56,3 +56,8 @@ be embedded in the executable: see [Windows 7 and the 32-bit build](Windows-7-an
 When switching from a GL API to Direct3D 9, the GL window is hidden instead of destroyed, so switching
 back is instant and Legacy GL keeps its state. Window events from that hidden window are ignored.
 See [Graphics APIs](Graphics-APIs.md#live-switching).
+
+In Borderless or Fullscreen the hidden GL window still covers the screen, and the OpenGL driver can keep it, so
+`CreateDevice` fails with `D3DERR_DEVICELOST`. In that case the GL windows are released and Direct3D 9 is tried once
+more. If it still fails, the game goes back to a new OpenGL window (the old context is no longer left current, which
+used to crash).

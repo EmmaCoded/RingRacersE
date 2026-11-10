@@ -883,9 +883,16 @@ static GLRGBAFloat shader_defaultcolor = {1.0f, 1.0f, 1.0f, 1.0f};
 		"float brightmap_mix = 0.0;\n" \
 		"float light_gain = 0.0;\n" \
 		"float final_lighting = lighting + light_gain;\n" \
-		GLSL_SOFTWARE_TINT_EQUATION \
-		GLSL_SOFTWARE_FADE_EQUATION \
-		"gl_FragColor = final_color;\n" \
+		/* Like Software: what is behind fades to the fog colour by the light level */ \
+		/* (destination*(1-d) + fog*d, blended as GL_ONE, GL_SRC_ALPHA in SetBlendMode). */ \
+		"float darkness = R_DoomLightingEquation(final_lighting);\n" \
+		"if (fade_start > 0.0 || fade_end < 31.0) {\n" \
+			"float fs = fade_start / 31.0;\n" \
+			"float fe = fade_end / 31.0;\n" \
+			"darkness = clamp((darkness - fs) * (1.0 / (fe - fs)), 0.0, 1.0);\n" \
+		"}\n" \
+		"float d = clamp(darkness * fade_color.a * 10.0, 0.0, 1.0);\n" \
+		"gl_FragColor = vec4(fade_color.rgb * d, 1.0 - d);\n" \
 	"}\0"
 
 // Sprite clipping makes me want to McFucking Die
@@ -1700,9 +1707,9 @@ static void SetBlendMode(FBITFIELD flags)
 	// Set blending function
 	if (flags & PF_Fog)
 	{
-		// Sryder: Fog
-		// multiplies input colour by input alpha, and destination colour by input colour, then adds them
-		pglBlendFunc(GL_SRC_ALPHA, GL_SRC_COLOR);
+		// Fog = colour + destination * alpha (the fog colour comes premultiplied, alpha = what stays visible),
+		// like Software. It was GL_SRC_ALPHA, GL_SRC_COLOR: a black fog block fading in left a grey veil.
+		pglBlendFunc(GL_ONE, GL_SRC_ALPHA);
 	}
 	else
 	{

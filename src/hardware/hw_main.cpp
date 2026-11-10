@@ -58,6 +58,7 @@
 /// \note	SRB2CB port.
 ///      	SRB2CB itself ported this from PrBoom+
 #include "hw_clip.h"
+#include "rr_gfxapi.h" // RRGfx_IsAngle (flat sky with ANGLE)
 
 #define R_FAKEFLOORS
 #define HWPRECIP
@@ -366,6 +367,20 @@ UINT8 HWR_FogBlockAlpha(INT32 light, extracolormap_t *colormap) // Let's see if 
 	}
 
 	return surfcolor.s.alpha;
+}
+
+// Fog block without shaders, like Software: what is behind fades to the fog colour by the light
+// (colour = fog * d premultiplied, alpha = 1 - d; r_opengl blends fog as GL_ONE, GL_SRC_ALPHA).
+static void HWR_FogNoShaderColor(FSurfaceInfo *Surf, INT32 light, extracolormap_t *colormap)
+{
+	RGBA_t fade;
+	fade.rgba = (colormap != NULL) ? (UINT32)colormap->fadergba : GL_DEFAULTFOG;
+	const float strength = std::min(1.0f, fade.s.alpha * 10.0f / 255.0f);
+	const float d = std::min(std::max(255 - light, 0), 255) / 255.0f * strength;
+	Surf->PolyColor.s.red = (UINT8)(fade.s.red * d);
+	Surf->PolyColor.s.green = (UINT8)(fade.s.green * d);
+	Surf->PolyColor.s.blue = (UINT8)(fade.s.blue * d);
+	Surf->PolyColor.s.alpha = (UINT8)(255.0f * (1.0f - d));
 }
 
 static FUINT HWR_CalcWallLight(FUINT lightnum, seg_t *seg)
@@ -1345,6 +1360,9 @@ static void HWR_RenderPlane(subsector_t *subsector, extrasubsector_t *xsub, bool
 	}
 	else
 		PolyFlags |= PF_Masked|PF_Modulated;
+
+	if ((PolyFlags & PF_Fog) && !HWR_UseShader())
+		HWR_FogNoShaderColor(&Surf, lightlevel, planecolormap);
 
 	if (HWR_UseShader())
 	{
@@ -7121,7 +7139,8 @@ static void HWR_DrawSkyBackground(player_t *player)
 	HWD.pfnSetBlend(PF_Translucent|PF_NoDepthTest|PF_Modulated);
 
 	// Low-End: the dome cost 5-34 ms/frame on slow hardware; flat sky (1 quad).
-	if (!RRE_GLLOWEND && cv_glskydome.value)
+	// With ANGLE (DirectX 11 / Vulkan) the dome turned ALL the 3D black: always flat sky there.
+	if (!RRE_GLLOWEND && cv_glskydome.value && !RRGfx_IsAngle(RRGfx_Active()))
 	{
 		FTransform dometransform;
 		const float fpov = FIXED_TO_FLOAT(R_FOV(viewssnum)+player->fovadd);
@@ -8016,6 +8035,8 @@ void HWR_RenderWall(FOutVector *wallVerts, FSurfaceInfo *pSurf, FBITFIELD blend,
 	HWR_Lighting(pSurf, lightlevel, wallcolormap, P_SectorUsesDirectionalLighting(gl_frontsector));
 
 	pSurf->PolyColor.s.alpha = alpha; // put the alpha back after lighting
+	if (fogwall && !HWR_UseShader())
+		HWR_FogNoShaderColor(pSurf, lightlevel, wallcolormap);
 
 	if (blend & PF_Environment)
 		blendmode |= PF_Occlude;	// PF_Occlude must be used for solid objects

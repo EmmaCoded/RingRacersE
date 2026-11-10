@@ -472,20 +472,25 @@ static int probe_vulkan_impl(void)
 	typedef void *(__stdcall *vkGIPA_t)(void *, const char *);
 	typedef int (__stdcall *vkEPD_t)(void *, unsigned *, void **);
 	typedef void (__stdcall *vkDI_t)(void *, const void *);
+	// Unload the SYSTEM vulkan-1.dll when done: ANGLE loads its own (angle folder), and with
+	// both loaded, RivaTuner (RTSSHooks64) crashed the AMD driver when the Vulkan window was created.
 	HMODULE m = LoadLibraryA("vulkan-1.dll");
 	if (!m) return 0;
+	int ok = 0;
 	vkGIPA_t gipa = (vkGIPA_t)GetProcAddress(m, "vkGetInstanceProcAddr");
 	vkCI_t ci = (vkCI_t)GetProcAddress(m, "vkCreateInstance");
-	if (!gipa || !ci) return 0;
 	VkAppInfo app = { 0, NULL, "ringracers", 1, "rr", 1, (1u << 22) };
 	VkInstCI ici = { 1, NULL, 0, &app, 0, NULL, 0, NULL };
 	void *inst = NULL;
-	if (ci(&ici, NULL, &inst) != 0 || !inst) return 0;
-	vkEPD_t epd = (vkEPD_t)gipa(inst, "vkEnumeratePhysicalDevices");
-	unsigned n = 0;
-	int ok = epd && epd(inst, &n, NULL) == 0 && n > 0;
-	vkDI_t di = (vkDI_t)gipa(inst, "vkDestroyInstance");
-	if (di) di(inst, NULL);
+	if (gipa && ci && ci(&ici, NULL, &inst) == 0 && inst)
+	{
+		vkEPD_t epd = (vkEPD_t)gipa(inst, "vkEnumeratePhysicalDevices");
+		unsigned n = 0;
+		ok = epd && epd(inst, &n, NULL) == 0 && n > 0;
+		vkDI_t di = (vkDI_t)gipa(inst, "vkDestroyInstance");
+		if (di) di(inst, NULL);
+	}
+	FreeLibrary(m);
 	return ok;
 }
 #endif

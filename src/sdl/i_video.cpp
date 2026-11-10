@@ -2012,6 +2012,10 @@ static void RR_DropSavedGl(void)
 	SDL_DestroyWindow(g_gl_saved_window);
 	g_gl_saved_window = NULL;
 	g_gl_saved_ctx = NULL;
+	// Make the current window's context current again (if D3D9 failed, Impl_CreateWindow already made a new GL
+	// window: without this the deleted context stayed current and Gl2Rhi::create_program crashed on a NULL glGetString)
+	if (window && sdlglcontext)
+		SDL_GL_MakeCurrent(window, sdlglcontext);
 }
 
 extern "C" int RRGfx_GLStale(void)
@@ -2103,7 +2107,15 @@ static void RR_LiveSwitchNow(void)
 		sdlglcontext = NULL;
 		Impl_CreateWindow(static_cast<SDL_bool>(USE_FULLSCREEN));
 		if (!g_d3d9_active)
-			RR_DropSavedGl(); // D3D9 failed: Impl_CreateWindow already made a NEW GL window; the saved one is not needed
+		{
+			// D3D9 failed (D3DERR_DEVICELOST): in Borderless/fullscreen the OpenGL driver still holds the screen
+			// through the hidden GL window. Drop everything GL and try once more.
+			RR_DestroyGlWindow(); // the fallback GL window made by Impl_CreateWindow
+			RR_DropSavedGl();
+			CONS_Printf("[D3D9] retrying without the saved OpenGL window\n");
+			g_d3d9_failed = false;
+			Impl_CreateWindow(static_cast<SDL_bool>(USE_FULLSCREEN));
+		}
 	}
 	else if (g_d3d9_active && g_gl_saved_window && g_mesa_api == to_impl)
 	{

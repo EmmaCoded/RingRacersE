@@ -539,7 +539,12 @@ void D3d9Rhi::create_device()
 			break;
 	}
 	if (FAILED(hr) || !dev_)
-		throw std::runtime_error("D3D9: could not create the device (CreateDevice failed)");
+	{
+		char msg[160];
+		snprintf(msg, sizeof msg, "D3D9: could not create the device (CreateDevice failed, hr=0x%08lX, %ux%u, ex=%d)",
+			static_cast<unsigned long>(hr), static_cast<unsigned>(back_w_), static_cast<unsigned>(back_h_), ex_ ? 1 : 0);
+		throw std::runtime_error(msg);
+	}
 
 	D3DCAPS9 caps = {};
 	dev_->GetDeviceCaps(&caps);

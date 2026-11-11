@@ -105,7 +105,7 @@ Licenses: ANGLE is BSD-3-Clause, Mesa is MIT, and the Vulkan loader (`vulkan-1.d
 - Ring Racers is based on [Sonic Robo Blast 2](https://srb2.org/), itself based on [Doom Legacy](http://doomlegacy.sourceforge.net/).
 - [ANGLE](https://chromium.googlesource.com/angle/angle) (Google and contributors), [Mesa](https://www.mesa3d.org/), [mesa-dist-win](https://github.com/pal1000/mesa-dist-win) (pal1000), Vulkan loader (Khronos Group).
 - **Craftyawesome** (Nintendo Switch port of Ring Racers), for advice on graphics APIs and performance.
-- Claude (Anthropic) was used as a programming assistant.
+- Claude (Anthropic) helped with the conversion of assets and music.
 
 ## License
 

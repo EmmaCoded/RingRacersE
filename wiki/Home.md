@@ -29,7 +29,7 @@ Online and configuration:
 
 Other:
 - [Windows 7 and the 32-bit build](Windows-7-and-32-bit.md)
-- [Small fixes](Small-Fixes.md): floor sprites on slopes, damaged ban file, window focus.
+- [Small fixes](Small-Fixes.md): floor sprites on slopes, damaged ban file, window focus, cheaper state changes.
 - [Developer options](Developer-Options.md): test options, command line switches and log tags.
 
 ## Where the new code is

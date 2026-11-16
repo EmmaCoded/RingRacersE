@@ -69,6 +69,8 @@ Low-End Mode changes the simulation, so every machine must use the same value. R
 - If that player leaves, the host's own setting comes back when the course ends.
 - A player without Low-End who joins a Low-End game plays in Low-End Mode, with a notice.
 - The join request carries a new `rrlowend` field (only read when the application is `RingRacersE`).
+- All players of a Low-End game need the same build: see
+  [Low-End Mode](Low-End-Mode.md#netgames-between-different-builds).
 
 **Why it is safe for players joining mid-course:** the netvar change is applied on the same tic on every machine
 (netcommands arrive in order), and a joining player loads the current netvars before `P_LoadLevel` runs.

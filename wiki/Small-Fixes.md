@@ -72,3 +72,25 @@ borders that covers the screen it is on; the game is scaled to it).
 
 If a C++ exception is not caught anywhere (for example inside a graphics backend on an unusual GPU), its message is
 written to the log before the game aborts, so the reason is not lost.
+
+## State changes cleared 28 KB every time
+
+File: `src/p_mobj.c` (`P_SetMobjState`, `P_SetPlayerMobjState`)
+
+**Problem:** both functions remember which states they have visited, to detect a cycle of zero-length states. They keep
+a `recursion` counter: when a state's action changes the state of the same kind of object again, the inner call uses a
+temporary table on the stack, which it must clear first (one entry per state in the game, about 28 KB).
+
+The counter goes up at the start and down at the very end, but the early returns skipped the end:
+"state is `S_NULL`, remove the object" (how every short-lived effect finishes), an object removed by its own action, and
+the "jump to another state" case of animated states. After the first of them the counter stayed above zero for the rest
+of the session, so **every** state change of every object cleared the whole temporary table, although nothing was
+recursive. On a slow CPU that clear cost more than the state change itself.
+
+**Fix:** each early return leaves the counter as it found it (`RRE_SEENSTATE_LEAVE`), exactly as the normal end of the
+function does. The states objects go through are the same; only the useless clear is gone, so this is active for
+everybody, not only in Low-End Mode.
+
+Original functions:
+[`P_SetPlayerMobjState`](https://github.com/KartKrewDev/RingRacers/blob/49beb6b74bce839f414b6ea9ad655f4a0c72a801/src/p_mobj.c#L225),
+[`P_SetMobjState`](https://github.com/KartKrewDev/RingRacers/blob/49beb6b74bce839f414b6ea9ad655f4a0c72a801/src/p_mobj.c#L403).

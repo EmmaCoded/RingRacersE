@@ -39,11 +39,11 @@ Video > Advanced > **Rendering Backend...** shows a list with every renderer you
 
 Video > Advanced > **Low-End Mode**. Off by default. When it is off, the game runs the original code.
 
-When it is on, the game uses lighter versions of several systems: rings far from players sleep, bot AI and bot waypoints update less often, distant springs, item boxes and decorations think less often, there are fewer particles and effects, and Legacy GL draws the level geometry from a static cache (`src/hardware/rr_staticgeo.cpp`) with a shorter draw distance, a flat sky and no horizon lines.
+When it is on, the game uses lighter versions of several systems: rings far from players sleep, bot AI and waypoints update less often, distant springs, item boxes and decorations think less often, fog and course decoration only animate, effects that cannot collide with anything move without collision checks, rain and snow exist only near the camera, there are fewer particles and effects, and Legacy GL draws the level geometry from a static cache (`src/hardware/rr_staticgeo.cpp`) with a shorter draw distance, a flat sky and no horizon lines.
 
 Low-End Mode is applied when a course loads. It is not used while watching replays.
 
-In netgames, the host decides: if the host uses Low-End Mode, every player uses it. A player who joins with Low-End Mode on while the game is running without it spectates until the end of the course, and then the whole game switches to Low-End Mode. Replays recorded with Low-End Mode on are not tested yet.
+In netgames, the host decides: if the host uses Low-End Mode, every player uses it. A player who joins with Low-End Mode on while the game is running without it spectates until the end of the course, and then the whole game switches to Low-End Mode. Replays recorded with Low-End Mode on are not tested yet. All players of a Low-End netgame need the same build of Ring Racers E.
 
 ### Online
 
@@ -57,6 +57,7 @@ In netgames, the host decides: if the host uses Low-End Mode, every player uses 
 - Own configuration file, `ringconfigE.cfg`, kept in sync with the official `ringconfig.cfg` key by key (the newest value wins; graphics settings are not synced), so both games can be used side by side.
 - 32-bit build (MinGW32) that runs on Windows 7. `d3dcompiler_47.dll` can be embedded inside the executable, because Windows 7 does not ship it.
 - Legacy GL fix: floor sprites (like sneaker panels) on slopes are no longer hidden under the floor.
+- Fix for a bug of the original code: every state change of every object cleared a 28 KB table for nothing (`P_SetMobjState`). The game logic is a bit faster for everybody.
 - A damaged `srvbans.json` no longer stops the game: it is renamed to `srvbans.json.bad` and the game continues.
 
 ## Download

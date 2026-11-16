@@ -20,7 +20,13 @@ build changes.
 | `ring_sleep` | 1 | 0 = no sleeping rings in Low-End Mode |
 | `fling_nocollide` | 1 | 0 = flung rings and debt spikes check object collisions again in Low-End Mode |
 | `bot_ai_mask` | 1 | 0 = bot AI every tic in Low-End Mode |
-| `bot_wp_mask` | 3 | Bots search waypoints 1 tic in (mask + 1) in Low-End Mode; 0 = every tic |
+| `far_sleep` | 1 | 0 = no sleep by distance (far flung rings, far kart smoke) in Low-End Mode |
+| `cheap_move` | 1 | 0 = visual objects move with the full collision check again in Low-End Mode |
+| `bot_wp_mask` | 7 | Bots search waypoints 1 tic in (mask + 1) in Low-End Mode; 0 = every tic |
+| `human_wp_mask` | 1 | Human players search waypoints 1 tic in (mask + 1) in Low-End Mode; 0 = every tic |
+| `precip_max` | 512 | Most rain or snow particles alive at once in Low-End Mode |
+| `precip_pertic` | 24 | Blockmap cells tried per tic and per view when creating precipitation in Low-End Mode |
+| `precip_density` | 2 | Particles allowed per blockmap cell (multiplied by the map scale) in Low-End Mode |
 | `bot_effects` | 0 | 1 = bots off screen keep their dust, smoke and speed lines in Low-End Mode |
 | `nostatic` | off | Turns off the [static geometry cache](Static-Geometry-Cache.md) |
 | `dist` | 12288 | Legacy GL draw distance in Low-End Mode (1024 to 32768), see [Legacy GL changes](Legacy-GL-Changes.md) |

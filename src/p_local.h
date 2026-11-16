@@ -276,6 +276,8 @@ void RRE_RingWake(mobj_t *mobj);      // sleeping ring
 void RRE_RingSyncFrame(mobj_t *mobj);
 extern UINT32 rre_ringSlept;
 extern int rre_ringSleepOn;
+extern UINT32 rre_farSlept;
+extern int rre_farSleepOn;
 
 void P_RunOverlays(void);
 #define OV_DONTSCREENOFFSET	1

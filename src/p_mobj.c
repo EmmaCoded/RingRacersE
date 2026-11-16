@@ -215,6 +215,8 @@ static void P_CycleMobjState(mobj_t *mobj)
 UINT32 rre_ringSlept = 0;
 int rre_flingNoCol = 1; // fling_nocollide=0 in rr_config.txt turns it off (read by p_tick.c)
 static boolean RRE_PlayerNear(mobj_t *mobj);
+UINT32 rre_farSlept = 0; // objects that slept or were removed because of distance
+int rre_farSleepOn = 1;  // far_sleep=0 in rr_config.txt turns it off
 int rre_ringSleepOn = 1; // ring_sleep=0 in rr_config.txt turns it off (read by p_tick.c at load)
 
 void RRE_RingSyncFrame(mobj_t *mobj)
@@ -265,6 +267,12 @@ static void P_CyclePlayerMobjState(mobj_t *mobj)
 //
 // Separate from P_SetMobjState because of the flashing check and Super states
 //
+// Ring Racers E: every early return must also leave "recursion" as it found it. In the original
+// code the early returns (the very common "state is S_NULL, remove the object" one included)
+// skipped the decrement at the end, so after the first of them "recursion" stayed above zero for
+// the rest of the session and EVERY state change cleared the whole temporary table (NUMSTATES
+// entries, about 28 KB). The result of the function is the same; only that useless clear is gone.
+#define RRE_SEENSTATE_LEAVE() do { if (!--recursion) for (;(state = seenstate[i]) > S_NULL; i = state - 1) seenstate[i] = S_NULL; } while (0)
 boolean P_SetPlayerMobjState(mobj_t *mobj, statenum_t state)
 {
 	state_t *st;
@@ -341,6 +349,7 @@ boolean P_SetPlayerMobjState(mobj_t *mobj, statenum_t state)
 		{ // Bad SOC!
 			CONS_Alert(CONS_ERROR, "Cannot remove player mobj by setting its state to S_NULL.\n");
 			//P_RemoveMobj(mobj);
+			RRE_SEENSTATE_LEAVE();
 			return false;
 		}
 
@@ -390,7 +399,11 @@ boolean P_SetPlayerMobjState(mobj_t *mobj, statenum_t state)
 					{
 						if (mobj->frame & FF_FRAMEMASK)
 							mobj->frame--;
-						return P_SetPlayerMobjState(mobj, st->var1);
+						{
+							boolean r = P_SetPlayerMobjState(mobj, st->var1);
+							RRE_SEENSTATE_LEAVE();
+							return r;
+						}
 					}
 				}
 				else
@@ -424,7 +437,10 @@ boolean P_SetPlayerMobjState(mobj_t *mobj, statenum_t state)
 			// woah. a player was removed by an action.
 			// this sounds like a VERY BAD THING, but there's nothing we can do now...
 			if (P_MobjWasRemoved(mobj))
+			{
+				RRE_SEENSTATE_LEAVE();
 				return false;
+			}
 		}
 
 		seenstate[state] = 1 + st->nextstate;
@@ -470,6 +486,7 @@ boolean P_SetMobjState(mobj_t *mobj, statenum_t state)
 	{
 		if (state == S_NULL)
 		{
+			RRE_SEENSTATE_LEAVE();
 			P_RemoveMobj(mobj);
 			return false;
 		}
@@ -520,7 +537,11 @@ boolean P_SetMobjState(mobj_t *mobj, statenum_t state)
 					{
 						if (mobj->frame & FF_FRAMEMASK)
 							mobj->frame--;
-						return P_SetMobjState(mobj, st->var1);
+						{
+							boolean r = P_SetMobjState(mobj, st->var1);
+							RRE_SEENSTATE_LEAVE();
+							return r;
+						}
 					}
 				}
 				else
@@ -549,7 +570,10 @@ boolean P_SetMobjState(mobj_t *mobj, statenum_t state)
 			astate = st;
 			st->action.acp1(mobj);
 			if (P_MobjWasRemoved(mobj))
+			{
+				RRE_SEENSTATE_LEAVE();
 				return false;
+			}
 		}
 
 		seenstate[state] = 1 + st->nextstate;
@@ -5708,6 +5732,27 @@ void P_RunOverlays(void)
 			mo->dispoffset++;
 		}
 
+#ifdef RR_LOWEND_CODE
+		// An overlay sits EXACTLY on its owner: when both are already in the same sector only the
+		// coordinates are copied (no relink, no P_CheckPosition). "Underlays" (var1) keep the
+		// original path because their place in the sector list matters when drawing.
+		if (RR_LOWEND && !mo->state->var1 && mo->subsector != NULL && mo->target->subsector != NULL
+			&& mo->subsector->sector == mo->target->subsector->sector)
+		{
+			mo->x = destx;
+			mo->y = desty;
+			mo->radius = mo->target->radius;
+			mo->height = mo->target->height;
+			if (mo->eflags & MFE_VERTICALFLIP)
+				mo->z = (mo->target->z + mo->target->height - mo->height) - zoffs;
+			else
+				mo->z = mo->target->z + zoffs;
+			mo->subsector = mo->target->subsector;
+			mo->floorz = mo->target->floorz;
+			mo->ceilingz = mo->target->ceilingz;
+			continue;
+		}
+#endif
 		P_UnsetThingPosition(mo);
 		mo->x = destx;
 		mo->y = desty;
@@ -11071,10 +11116,6 @@ static boolean RRE_OwnerIsQuietBot(mobj_t *mobj)
 		&& !P_IsDisplayPlayer(o->player));
 }
 
-static boolean RRE_RingFar(mobj_t *mobj)
-{
-	return RRE_RingFarDist(mobj, 3000*FRACUNIT);
-}
 
 // If 1, the ring fast path still calls the sector
 // actions (P_CheckMobjTouchingSectorActions). 0 = they are skipped.
@@ -11269,6 +11310,37 @@ void P_MobjThinker(mobj_t *mobj)
 		P_RemoveMobj(mobj);
 		return;
 	}
+	// SLEEP BY DISTANCE. Only effects and flung rings (sectors, lifts and FOFs are not objects).
+	// (1) A flung ring with no magnet, farther than 2500 from EVERY kart (bots included, not only
+	//     the camera): it does not think 3 tics in 4. Its fuse keeps counting so it still dies on
+	//     time, and it thinks normally again as soon as a kart gets close. The turn comes from
+	//     leveltime alone (not from the object's address), so every machine in a netgame skips
+	//     the same tics.
+	// (2) Kart smoke, dust and sparks farther than 3000 from every camera are removed.
+	if (rre_farSleepOn)
+	{
+		if (mobj->type == MT_FLINGRING && mobj->tracer == NULL
+			&& (leveltime & 3)
+			&& RRE_RingFarDist(mobj, 2500*FRACUNIT))
+		{
+			if (mobj->fuse > 1) { mobj->fuse--; rre_farSlept++; return; }
+			if (mobj->fuse == 0) { rre_farSlept++; return; }
+		}
+		switch (mobj->type)
+		{
+			case MT_BOOSTSMOKE: case MT_BOOSTFLAME: case MT_SPINDASHDUST: case MT_RINGSPARKS:
+			case MT_DRIFTDUST: case MT_BRAKEDUST: case MT_TIREGREASE: case MT_JANKSPARK:
+				if (RRE_FarFromViews(mobj, 3000*FRACUNIT))
+				{
+					rre_farSlept++;
+					P_RemoveMobj(mobj);
+					return;
+				}
+				break;
+			default:
+				break;
+		}
+	}
 	// Idle ring -> only what the original would really do:
 	// P_RingThinker (=P_CycleMobjState with mom/fuse at 0) + A_AttractChase.
 	// Skipped: sector actions (see MK7_RING_SECTORACT), Lua hook and dispatch.
@@ -11325,8 +11397,42 @@ void P_MobjThinker(mobj_t *mobj)
 		return;
 	}
 
+	// Fog (MT_EERIEFOG, about 1050 in Umbrella Rushwinds): it stands still, it is NOCLIP and
+	// nothing touches it, but each one asked for a P_CheckPosition every tic. It only changes
+	// state (animation). If something pushes it (wind), it moves without the check
+	// (P_MoveOrigin -> RRE_CheapMove, p_map.c).
+	if (mobj->type == MT_EERIEFOG
+		&& mobj->player == NULL
+		&& mobj->scale == mobj->destscale && mobj->fuse == 0
+		&& !(mobj->flags & (MF_SOLID|MF_SPECIAL|MF_SHOOTABLE|MF_MISSILE|MF_PUSHABLE|MF_PAIN)))
+	{
+		if (mobj->momx || mobj->momy || mobj->momz)
+			P_MoveOrigin(mobj, mobj->x + mobj->momx, mobj->y + mobj->momy, mobj->z + mobj->momz);
+		P_CycleMobjState(mobj);
+		return;
+	}
+
+	// Decoration defined by the course itself (FREESLOT types from SOC: flowers, bushes, trees;
+	// Umbrella Rushwinds has about 800). They have no logic of their own in the engine: standing
+	// still and resting on the floor (or without gravity) they only animate.
+	if (mobj->type >= MT_FIRSTFREESLOT
+		&& (mobj->flags & MF_SCENERY)
+		&& !(mobj->flags & (MF_SPECIAL|MF_SHOOTABLE|MF_MISSILE|MF_PUSHABLE|MF_ENEMY|MF_BOSS|MF_PAIN))
+		&& mobj->player == NULL && mobj->tracer == NULL && mobj->target == NULL
+		&& mobj->health > 0 && mobj->fuse == 0
+		&& mobj->scale == mobj->destscale
+		&& mobj->momx == 0 && mobj->momy == 0 && mobj->momz == 0
+		&& !(mobj->eflags & MFE_APPLYPMOMZ)
+		&& ((mobj->flags & MF_NOGRAVITY)
+			|| ((mobj->eflags & MFE_VERTICALFLIP) ? (mobj->z + mobj->height == mobj->ceilingz) : (mobj->z == mobj->floorz))))
+	{
+		if (mobj->tics != -1)
+			P_CycleMobjState(mobj);
+		return;
+	}
+
 	// Idle decoration (scenery, fixed state tics=-1, no movement) far from
-	// every player: think only 1 in 4 tics (cacti, pumpkins...).
+	// every camera: think only 1 in 4 tics (cacti, pumpkins...).
 	if ((leveltime & 3)
 		&& (mobj->flags & MF_SCENERY)
 		&& mobj->tics == -1
@@ -11334,7 +11440,7 @@ void P_MobjThinker(mobj_t *mobj)
 		&& mobj->fuse == 0 && mobj->hitlag == 0
 		&& mobj->momx == 0 && mobj->momy == 0 && mobj->momz == 0
 		&& mobj->scale == mobj->destscale
-		&& RRE_RingFar(mobj))
+		&& RRE_FarFromViews(mobj, 2500*FRACUNIT))
 		return;
 	} // RR_LOWEND
 #endif
@@ -11707,7 +11813,13 @@ void P_SceneryThinker(mobj_t *mobj)
 	{
 #ifdef RR_LOWEND_CODE
 		// Idle floating decoration with no players nearby -> skip ZMovement+CheckPosition.
-		if (RR_LOWEND && mobj->type == MT_BATTLECAPSULE_PIECE && (mobj->flags & MF_NOCLIPHEIGHT) && !(mobj->eflags & MFE_APPLYPMOMZ))
+		// The same goes for ANY effect that passes through everything (smoke, dust, sparks, trails).
+		if (RR_LOWEND && !(mobj->eflags & MFE_APPLYPMOMZ)
+			&& ((mobj->type == MT_BATTLECAPSULE_PIECE && (mobj->flags & MF_NOCLIPHEIGHT))
+				|| ((mobj->flags & (MF_NOBLOCKMAP|MF_NOCLIP|MF_NOCLIPHEIGHT|MF_NOGRAVITY)) == (MF_NOBLOCKMAP|MF_NOCLIP|MF_NOCLIPHEIGHT|MF_NOGRAVITY)
+					&& mobj->player == NULL
+					&& mobj->type != MT_BOOMEXPLODE && mobj->type != MT_BOOMPARTICLE
+					&& mobj->type != MT_SMALLBUBBLE && mobj->type != MT_MEDIUMBUBBLE)))
 		{
 			// Capsule follower piece (NOCLIP, no gravity, ~98 per map): ZMovement
 			// only does z += momz; P_CheckPosition (floor/ceiling) is useless for a NOCLIP.
@@ -12860,9 +12972,39 @@ void P_RemoveSavegameMobj(mobj_t *mobj)
 	P_UnlinkThinker((thinker_t*)mobj);
 }
 
-static void P_SpawnPrecipitationAt(fixed_t basex, fixed_t basey)
+#ifdef RR_LOWEND_CODE
+// PRECIPITATION THAT FOLLOWS THE CAMERA (low-end mode).
+// The original creates particles over the WHOLE map when it loads: about 100,000 in Launch Base
+// or Blue Mountain 2 (28 MB), and every moving sector recomputes the floor of all its particles
+// each tic (P_RecalcPrecipInSector).
+// Here only the ones near a camera exist: each tic, the ones farther than 1.5 x drawdist_precip
+// are removed and new ones are created (up to precip_pertic tries) in random blockmap cells
+// inside the draw distance, never more than precip_density per cell or precip_max in total.
+// Drawing is unchanged (it already uses precipblocklinks inside drawdist_precip).
+// It has its own random generator, so the game's one is not touched.
+static UINT32 rre_precip_rng = 0x9E3779B9u;
+static int rre_precip_max = 512, rre_precip_pertic = 24, rre_precip_density = 2, rre_precip_read = 0;
+static UINT32 Precip_Rand(void)
+{
+	UINT32 x = rre_precip_rng;
+	x ^= x << 13; x ^= x >> 17; x ^= x << 5;
+	rre_precip_rng = x ? x : 0x9E3779B9u;
+	return rre_precip_rng;
+}
+static INT32 Precip_RandKey(INT32 n) { return RR_LOWEND ? (INT32)(Precip_Rand() % (UINT32)n) : M_RandomKey(n); }
+static UINT8 Precip_RandByte(void) { return RR_LOWEND ? (UINT8)Precip_Rand() : M_RandomByte(); }
+static INT32 Precip_RandRange(INT32 a, INT32 b) { return RR_LOWEND ? a + (INT32)(Precip_Rand() % (UINT32)(b - a + 1)) : M_RandomRange(a, b); }
+#else
+#define Precip_RandKey M_RandomKey
+#define Precip_RandByte M_RandomByte
+#define Precip_RandRange M_RandomRange
+#endif
+
+// Returns how many particles it created.
+static INT32 P_SpawnPrecipitationAt(fixed_t basex, fixed_t basey)
 {
 	INT32 j, k;
+	INT32 created = 0;
 
 	const mobjtype_t type = precipprops[curWeather].type;
 	const UINT8 randomstates = (UINT8)mobjinfo[type].damage;
@@ -12880,8 +13022,8 @@ static void P_SpawnPrecipitationAt(fixed_t basex, fixed_t basey)
 	// more area so spawn more precipitation in that area.
 	for (i = 0; i < FRACUNIT; i += mapobjectscale)
 	{
-		x = basex + ((M_RandomKey(MAPBLOCKUNITS << 3) << FRACBITS) >> 3);
-		y = basey + ((M_RandomKey(MAPBLOCKUNITS << 3) << FRACBITS) >> 3);
+		x = basex + ((Precip_RandKey(MAPBLOCKUNITS << 3) << FRACBITS) >> 3);
+		y = basey + ((Precip_RandKey(MAPBLOCKUNITS << 3) << FRACBITS) >> 3);
 
 		precipsector = R_PointInSubsectorOrNull(x, y);
 
@@ -12946,10 +13088,11 @@ static void P_SpawnPrecipitationAt(fixed_t basex, fixed_t basey)
 			INT32 ceilingz;
 
 			rainmo = P_SpawnPrecipMobj(x, y, z, type);
+			created++;
 
 			if (randomstates > 0)
 			{
-				UINT8 mrand = M_RandomByte();
+				UINT8 mrand = Precip_RandByte();
 				UINT8 threshold = UINT8_MAX / (randomstates + 1);
 				statenum_t st = mobjinfo[type].spawnstate;
 
@@ -12969,7 +13112,7 @@ static void P_SpawnPrecipitationAt(fixed_t basex, fixed_t basey)
 			if (floorz < ceilingz)
 			{
 				// Randomly assign a height, now that floorz is set.
-				rainmo->z = M_RandomRange(floorz, ceilingz) << FRACBITS;
+				rainmo->z = Precip_RandRange(floorz, ceilingz) << FRACBITS;
 			}
 			else
 			{
@@ -12978,7 +13121,125 @@ static void P_SpawnPrecipitationAt(fixed_t basex, fixed_t basey)
 			}
 		}
 	}
+
+	return created;
 }
+
+#ifdef RR_LOWEND_CODE
+// Position of view i (the camera when it chases; otherwise the kart of the player shown).
+static boolean Precip_ViewPos(INT32 i, fixed_t *x, fixed_t *y)
+{
+	const INT32 p = displayplayers[i];
+
+	if (camera[i].chase && camera[i].subsector)
+	{
+		*x = camera[i].x;
+		*y = camera[i].y;
+		return true;
+	}
+	if (p >= 0 && p < MAXPLAYERS && playeringame[p] && players[p].mo && !P_MobjWasRemoved(players[p].mo))
+	{
+		*x = players[p].mo->x;
+		*y = players[p].mo->y;
+		return true;
+	}
+	return false;
+}
+
+static boolean Precip_NearAnyView(fixed_t x, fixed_t y, fixed_t dist)
+{
+	INT32 i;
+	for (i = 0; i <= r_splitscreen; i++)
+	{
+		fixed_t cx, cy;
+		if (!Precip_ViewPos(i, &cx, &cy))
+			continue;
+		if (abs(x - cx) <= dist && abs(y - cy) <= dist)
+			return true;
+	}
+	return false;
+}
+
+// How many particles a blockmap cell already has (drawing list).
+static INT32 Precip_InCell(INT32 bx, INT32 by)
+{
+	INT32 n = 0;
+	precipmobj_t *th;
+	for (th = precipblocklinks[(by * bmapwidth) + bx]; th; th = th->bnext)
+		n++;
+	return n;
+}
+
+// Called once per tic from P_Ticker (after the cameras move). See the comment above.
+void RRE_PrecipFollow(void)
+{
+	const mobjtype_t type = precipprops[curWeather].type;
+	const fixed_t drawdist = cv_drawdist_precip.value * mapobjectscale;
+	thinker_t *think, *next;
+	INT32 alive = 0, i, tries, percell;
+	fixed_t fardist;
+
+	if (!rre_precip_read)
+	{
+		rre_precip_read = 1;
+		rre_precip_max = RRCfg_Int("precip_max", 512);
+		rre_precip_pertic = RRCfg_Int("precip_pertic", 24);
+		rre_precip_density = RRCfg_Int("precip_density", 2);
+	}
+
+	if (dedicated || !cv_drawdist_precip.value || type == MT_NULL || drawdist <= 0 || !precipblocklinks)
+		return;
+
+	fardist = drawdist + (drawdist >> 1);
+
+	// 1) remove the far ones, count the rest
+	for (think = thlist[THINK_PRECIP].next; think != &thlist[THINK_PRECIP]; think = next)
+	{
+		precipmobj_t *pm = (precipmobj_t *)think;
+		next = think->next;
+		if (think->function.acp1 != (actionf_p1)P_NullPrecipThinker)
+			continue;
+		if (!Precip_NearAnyView(pm->x, pm->y, fardist))
+		{
+			P_FreePrecipMobj(pm);
+			continue;
+		}
+		alive++;
+	}
+
+	// 2) create near each view: random cells inside the draw distance.
+	// The original density per cell is (1/mapobjectscale) x (1 + height/2048); here a fixed cap.
+	percell = rre_precip_density * max(1, FixedDiv(FRACUNIT, mapobjectscale) >> FRACBITS);
+	for (i = 0; i <= r_splitscreen && alive < rre_precip_max; i++)
+	{
+		fixed_t cx, cy;
+		INT32 xl, xh, yl, yh;
+
+		if (!Precip_ViewPos(i, &cx, &cy))
+			continue;
+
+		xl = (cx - drawdist - bmaporgx) >> MAPBLOCKSHIFT;
+		xh = (cx + drawdist - bmaporgx) >> MAPBLOCKSHIFT;
+		yl = (cy - drawdist - bmaporgy) >> MAPBLOCKSHIFT;
+		yh = (cy + drawdist - bmaporgy) >> MAPBLOCKSHIFT;
+		if (xl < 0) xl = 0;
+		if (yl < 0) yl = 0;
+		if (xh >= bmapwidth) xh = bmapwidth - 1;
+		if (yh >= bmapheight) yh = bmapheight - 1;
+		if (xl > xh || yl > yh)
+			continue;
+
+		for (tries = 0; tries < rre_precip_pertic && alive < rre_precip_max; tries++)
+		{
+			const INT32 bx = xl + Precip_RandKey(xh - xl + 1);
+			const INT32 by = yl + Precip_RandKey(yh - yl + 1);
+			if (Precip_InCell(bx, by) >= percell)
+				continue;
+			alive += P_SpawnPrecipitationAt(bmaporgx + bx * MAPBLOCKSIZE, bmaporgy + by * MAPBLOCKSIZE);
+		}
+	}
+}
+#endif
 
 void P_SpawnPrecipitation(void)
 {
@@ -12990,6 +13251,11 @@ void P_SpawnPrecipitation(void)
 
 	if (dedicated || !cv_drawdist_precip.value || type == MT_NULL)
 		return;
+
+#ifdef RR_LOWEND_CODE
+	if (RR_LOWEND)
+		return; // RRE_PrecipFollow creates it every tic, only near the cameras
+#endif
 
 	// Use the blockmap to narrow down our placing patterns
 	for (i = 0; i < bmapwidth*bmapheight; ++i)

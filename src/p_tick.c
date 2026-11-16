@@ -570,7 +570,7 @@ static void P_RunThinkers(void)
 #ifdef RR_LOWEND_CODE
 	{
 		static int loaded = 0;
-		if (!loaded) { loaded = 1; rre_ringSleepOn = RRCfg_Int("ring_sleep", 1); { extern int rre_flingNoCol; rre_flingNoCol = RRCfg_Int("fling_nocollide", 1); } }
+		if (!loaded) { loaded = 1; rre_ringSleepOn = RRCfg_Int("ring_sleep", 1); rre_farSleepOn = RRCfg_Int("far_sleep", 1); { extern int rre_flingNoCol; rre_flingNoCol = RRCfg_Int("fling_nocollide", 1); } }
 	}
 #endif
 	for (i = 0; i < NUM_ACTIVETHINKERLISTS; i++)
@@ -580,12 +580,12 @@ static void P_RunThinkers(void)
 		if (i == THINK_MOBJ && RR_LOWEND) // low-end mode only
 		{
 			// Sleeping rings (data only): skipped without calling the thinker.
-			// 1 in 8 tics (staggered) they are still checked, to be safe.
+			// 1 in 32 tics (staggered) they are still checked, to be safe.
 			for (currentthinker = thlist[i].next; currentthinker != &thlist[i]; currentthinker = currentthinker->next)
 			{
 				if (currentthinker->rre_sleep
 					&& currentthinker->function.acp1 == (actionf_p1)P_MobjThinker
-					&& ((leveltime + (UINT32)((uintptr_t)currentthinker >> 6)) & 7))
+					&& ((leveltime + (UINT32)((uintptr_t)currentthinker >> 6)) & 31))
 				{
 					rre_ringSlept++;
 					RRE_RingSyncFrame((mobj_t *)currentthinker); // Software does not do it at draw time
@@ -1257,6 +1257,10 @@ void P_Ticker(boolean run)
 		// Move the camera during levels.
 		K_UpdateDirector();
 		P_RunChaseCameras();
+#ifdef RR_LOWEND_CODE
+		if (run && RR_LOWEND && !levelloading)
+			RRE_PrecipFollow(); // precipitation only near the cameras (p_mobj.c)
+#endif
 	}
 
 	if (run && !levelloading && leveltime)

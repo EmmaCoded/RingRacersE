@@ -46,6 +46,7 @@
 #include "lua_hook.h"
 
 #include "m_perfstats.h" // ps_checkposition_calls
+#include "rr_config.h" // Ring Racers E: RR_LOWEND, cheap_move
 
 tm_t g_tm = {0};
 
@@ -103,8 +104,104 @@ camera_t *mapcampointer;
 //
 // P_TeleportMove
 //
+#ifdef RR_LOWEND_CODE
+// Ring Racers E (low-end mode): decorations that follow a kart (charge aura, AMP, BLOCK...).
+// Nothing collides with them.
+static boolean RRE_IsFollowVisual(const mobj_t *thing)
+{
+	switch (thing->type)
+	{
+		case MT_CHARGEAURA: case MT_AMPRING: case MT_AMPBODY: case MT_AMPAURA:
+		case MT_BLOCKRING: case MT_BLOCKBODY:
+		case MT_EXP: // experience orbs: they fly to the kart by themselves, nothing touches them
+		case MT_EERIEFOG: // fog (Umbrella Rushwinds: about 1050 checks per tic)
+			return true;
+		case MT_RING: case MT_FLINGRING:
+			// a ring ALREADY picked up (it circles the kart for 16 tics) or spent (it hops over the kart)
+			if (thing->extravalue1 != 0)
+				return true;
+			break;
+		default:
+			break;
+	}
+	// Any other visual-only object: out of the blockmap, no gravity and no collisions.
+	return ((thing->flags & (MF_NOBLOCKMAP|MF_NOGRAVITY|MF_NOCLIPHEIGHT)) == (MF_NOBLOCKMAP|MF_NOGRAVITY|MF_NOCLIPHEIGHT)
+		&& (thing->flags & (MF_NOCLIP|MF_NOCLIPTHING))
+		&& !(thing->flags & (MF_SOLID|MF_SPECIAL|MF_SHOOTABLE|MF_MISSILE|MF_PUSHABLE|MF_ENEMY|MF_BOSS|MF_PAIN)));
+}
+
+static int rre_cheapMove = -1; // rr_config: cheap_move=0 turns it off
+
+// Move a decoration WITHOUT P_CheckPosition (the expensive part of every move).
+// Same sector = only x/y/z change. Another sector = relink. Floor and ceiling come from the sector.
+static boolean RRE_CheapMove(mobj_t *thing, fixed_t x, fixed_t y, fixed_t z)
+{
+	subsector_t *ss = R_PointInSubsector(x, y);
+
+	if (thing->subsector != NULL && ss->sector == thing->subsector->sector
+		&& !(thing->flags & MF_NOSECTOR) && (thing->flags & MF_NOBLOCKMAP))
+	{
+		thing->x = x;
+		thing->y = y;
+		thing->z = z;
+		thing->subsector = ss;
+	}
+	else
+	{
+		P_UnsetThingPosition(thing);
+		if (sector_list)
+		{
+			P_DelSeclist(sector_list);
+			sector_list = NULL;
+		}
+		// AMP/BLOCK/aura objects are born inside the blockmap although nothing collides with
+		// them: they are taken out (so next time they use the "same sector" path).
+		thing->flags |= MF_NOBLOCKMAP;
+		thing->x = x;
+		thing->y = y;
+		thing->z = z;
+		P_SetThingPosition(thing);
+	}
+
+	thing->floorz = P_GetSectorFloorZAt(ss->sector, x, y);
+	thing->ceilingz = P_GetSectorCeilingZAt(ss->sector, x, y);
+	thing->floorrover = NULL;
+	thing->ceilingrover = NULL;
+	return true;
+}
+
+// An effect that passes through everything (smoke, dust, sparks, trails): when it moves by its
+// own momentum it does not need P_CheckPosition either.
+static boolean RRE_NoclipVisual(const mobj_t *thing)
+{
+	return (thing->player == NULL && thing->subsector != NULL
+		&& (thing->flags & (MF_NOBLOCKMAP|MF_NOCLIP|MF_NOCLIPHEIGHT)) == (MF_NOBLOCKMAP|MF_NOCLIP|MF_NOCLIPHEIGHT)
+		&& !(thing->flags & (MF_SOLID|MF_SPECIAL|MF_SHOOTABLE|MF_MISSILE|MF_PUSHABLE|MF_ENEMY|MF_BOSS|MF_PAIN|MF_NOSECTOR)));
+}
+
+static boolean RRE_TryCheapMove(mobj_t *thing, fixed_t x, fixed_t y)
+{
+	if (!RR_LOWEND || !RRE_NoclipVisual(thing))
+		return false;
+	if (rre_cheapMove < 0)
+		rre_cheapMove = RRCfg_Int("cheap_move", 1);
+	if (!rre_cheapMove)
+		return false;
+	return RRE_CheapMove(thing, x, y, thing->z);
+}
+#endif
+
 static boolean P_TeleportMove(mobj_t *thing, fixed_t x, fixed_t y, fixed_t z)
 {
+#ifdef RR_LOWEND_CODE
+	if (RR_LOWEND && thing->player == NULL && thing->subsector != NULL && RRE_IsFollowVisual(thing))
+	{
+		if (rre_cheapMove < 0)
+			rre_cheapMove = RRCfg_Int("cheap_move", 1);
+		if (rre_cheapMove)
+			return RRE_CheapMove(thing, x, y, z);
+	}
+#endif
 	boolean startingonground = P_IsObjectOnGround(thing);
 	sector_t *oldsector = thing->subsector->sector;
 
@@ -3104,6 +3201,15 @@ boolean P_TryMove(mobj_t *thing, fixed_t x, fixed_t y, boolean allowdropoff, Try
 	pslope_t *oldslope = thing->standingslope;
 	sector_t *oldsector = thing->subsector->sector;
 
+#ifdef RR_LOWEND_CODE
+	if (RRE_TryCheapMove(thing, x, y))
+	{
+		if (result != NULL)
+			result->success = true;
+		return true;
+	}
+#endif
+
 	// Is the move OK?
 	if (increment_move(thing, x, y, allowdropoff, &stairjank, result) == false)
 	{
@@ -3303,6 +3409,11 @@ boolean P_TryMove(mobj_t *thing, fixed_t x, fixed_t y, boolean allowdropoff, Try
 boolean P_SceneryTryMove(mobj_t *thing, fixed_t x, fixed_t y, TryMoveResult_t *result)
 {
 	fixed_t tryx, tryy;
+
+#ifdef RR_LOWEND_CODE
+	if (RRE_TryCheapMove(thing, x, y))
+		return true;
+#endif
 
 	tryx = thing->x;
 	tryy = thing->y;

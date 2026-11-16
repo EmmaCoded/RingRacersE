@@ -1517,6 +1517,13 @@ static void K_DrawDraftCombiring(player_t *player, mobj_t *victim, fixed_t curdi
 	fixed_t curx, cury, curz;
 	UINT8 c;
 
+#ifdef RR_LOWEND_CODE
+	// Draft band between two rivals (neither is the player on screen): not created.
+	// It was about 5 new sparks per tic and per pair, decoration only.
+	if (RRE_QuietKart(player) && !(victim && victim->player && P_IsDisplayPlayer(victim->player)))
+		return;
+#endif
+
 	if (maxdist == 0)
 	{
 		c = leveltime % CHAOTIXBANDCOLORS;
@@ -13848,10 +13855,15 @@ void K_UpdateAllPlayerPositions(void)
 
 #ifdef RR_LOWEND_CODE
 		// With 8 racers this waypoint search took ~18 ms per tic. Bots
-		// repeat it only 1 in (mask+1) tics, staggered; the human player always.
+		// repeat it only 1 in (mask+1) tics, staggered; human players 1 tic in 2
+		// (never while respawning or before they have a waypoint).
 		{
 			static int rrMask = -1;
-			if (rrMask < 0) rrMask = RRCfg_Int("bot_wp_mask", 3);
+			static int rrHumMask = -1;
+			if (rrMask < 0) { rrMask = RRCfg_Int("bot_wp_mask", 7); rrHumMask = RRCfg_Int("human_wp_mask", 1); }
+			if (RR_LOWEND && rrHumMask > 0 && !player->bot && player->currentwaypoint != NULL
+				&& player->respawn.state == RESPAWNST_NONE && ((leveltime + (tic_t)i) & (tic_t)rrHumMask))
+				continue;
 			if (RR_LOWEND && rrMask > 0 && player->bot && !P_IsDisplayPlayer(player) && ((leveltime + (tic_t)i) & (tic_t)rrMask))
 				continue;
 		}

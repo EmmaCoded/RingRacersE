@@ -11526,6 +11526,13 @@ void P_MobjThinker(mobj_t *mobj)
 		return;
 	}
 
+#ifdef RR_LOWEND_CODE
+	// Quartz Quadrant: the saw spark spawner (doomednum 697) runs a Lua MobjThinker every 4 tics
+	// (a spark, 2 smokes and 2 particles). It is decoration only: in Low-End Mode it runs 1 tic in 8.
+	if (RR_LOWEND && mobj->type >= MT_FIRSTFREESLOT && mobjinfo[mobj->type].doomednum == 697
+		&& (leveltime & 7))
+		return;
+#endif
 	// Check for a Lua thinker first
 	if (!mobj->player)
 	{
@@ -11819,7 +11826,8 @@ void P_SceneryThinker(mobj_t *mobj)
 				|| ((mobj->flags & (MF_NOBLOCKMAP|MF_NOCLIP|MF_NOCLIPHEIGHT|MF_NOGRAVITY)) == (MF_NOBLOCKMAP|MF_NOCLIP|MF_NOCLIPHEIGHT|MF_NOGRAVITY)
 					&& mobj->player == NULL
 					&& mobj->type != MT_BOOMEXPLODE && mobj->type != MT_BOOMPARTICLE
-					&& mobj->type != MT_SMALLBUBBLE && mobj->type != MT_MEDIUMBUBBLE)))
+					&& mobj->type != MT_SMALLBUBBLE && mobj->type != MT_MEDIUMBUBBLE)
+				|| (mobj->type == MT_SMOKE && (mobj->flags & (MF_NOBLOCKMAP|MF_NOCLIP|MF_NOGRAVITY)) == (MF_NOBLOCKMAP|MF_NOCLIP|MF_NOGRAVITY))))
 		{
 			// Capsule follower piece (NOCLIP, no gravity, ~98 per map): ZMovement
 			// only does z += momz; P_CheckPosition (floor/ceiling) is useless for a NOCLIP.

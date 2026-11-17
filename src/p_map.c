@@ -115,6 +115,7 @@ static boolean RRE_IsFollowVisual(const mobj_t *thing)
 		case MT_BLOCKRING: case MT_BLOCKBODY:
 		case MT_EXP: // experience orbs: they fly to the kart by themselves, nothing touches them
 		case MT_EERIEFOG: // fog (Umbrella Rushwinds: about 1050 checks per tic)
+		case MT_SMOKE: // smoke (Quartz Quadrant: about 350 checks per tic), NOCLIP + NOBLOCKMAP
 			return true;
 		case MT_RING: case MT_FLINGRING:
 			// a ring ALREADY picked up (it circles the kart for 16 tics) or spent (it hops over the kart)

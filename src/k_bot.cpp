@@ -2096,10 +2096,13 @@ void K_BuildBotTiccmd(
 #ifdef RR_LOWEND_CODE
 	// The bot AI (including one A* per bot and tic) runs 1 in 2 tics, staggered by
 	// player. On the in-between tic it repeats the last input but WITHOUT one-shot buttons
-	// (item, etc.): only steering, accelerate, brake and drift. rr_config: bot_ai_mask=0 turns it off.
+	// (item, etc.): only steering, accelerate, brake and drift. rr_config: bot_ai_mask=1 turns it on.
 	static ticcmd_t s_lastBotCmd[MAXPLAYERS];
 	static int rrAiMask = -1;
-	if (rrAiMask < 0) rrAiMask = RRCfg_Int("bot_ai_mask", 1);
+	// Off by default: with the 1-in-2 reuse some bots could stay stuck for a whole race (no speed,
+	// accelerate and brake pressed together) and others crawled; with the AI every tic nobody gets stuck
+	// and it costs about 5% of the race time. bot_ai_mask=1 turns it back on.
+	if (rrAiMask < 0) rrAiMask = RRCfg_Int("bot_ai_mask", 0);
 	const size_t rrIdx = static_cast<size_t>(player - players);
 	const bool rrReuse = RR_LOWEND && rrAiMask > 0 && player->botvars.style != BOT_STYLE_STAY && rrIdx < MAXPLAYERS
 		&& ((leveltime + rrIdx) & static_cast<tic_t>(rrAiMask)) != 0 && leveltime > starttime + 2;

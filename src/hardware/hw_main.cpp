@@ -6149,6 +6149,20 @@ static void HWR_DrawSprites(void)
 	HWD.pfnSetBlend(PF_Translucent|PF_Occlude|PF_Masked);
 }
 
+// Low-End Mode only (drawing only, the simulation is untouched, so it is safe online): rings farther than
+// 2800 units are not projected and at most 20 rings per BSP pass are (the BSP walks near to far,
+// so the dropped ones are the farthest). Each ring sprite costs CPU time on weak machines.
+// rr_config: rings_max=N (0 = no limit).
+static boolean RRE_ringBudget(INT32 vc)
+{
+	static INT32 lastvc = -1;
+	static INT32 n = 0, maxn = -1;
+	if (maxn < 0) maxn = RRCfg_Int("rings_max", 20);
+	if (!maxn) return true;
+	if (vc != lastvc) { lastvc = vc; n = 0; }
+	return ++n <= maxn;
+}
+
 // --------------------------------------------------------------------------
 // HWR_AddSprites
 // During BSP traversal, this adds sprites by sector.
@@ -6180,7 +6194,12 @@ static void HWR_AddSprites(sector_t *sec)
 	{
 		if (R_ThingWithinDist(thing, limit_dist))
 		{
-			if (R_ThingVisible(thing))
+			if (RR_LOWEND && (gametyperules & GTR_CIRCUIT) && thing->type == MT_RING && R_ThingVisible(thing)
+				&& (!R_ThingWithinDist(thing, 2800*mapobjectscale) || RRE_ringBudget(validcount) == false))
+			{
+				// Low-End Mode: far ring, not projected
+			}
+			else if (R_ThingVisible(thing))
 			{
 				rre_sprTypeCnt[thing->type]++;
 				HWR_ProjectSprite(thing);

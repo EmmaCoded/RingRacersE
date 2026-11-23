@@ -803,8 +803,11 @@ void P_InvincGrowMusic(void)
 		Music_Play("grow");
 	}
 
-	Music_DelayEnd("invinc", invinc);
-	Music_DelayEnd("grow", grow);
+	// With 0 and nothing playing, DelayEnd called g_tunes.tick() every tic (26 ms/tic on slow hardware)
+	if (invinc || Music_Playing("invinc"))
+		Music_DelayEnd("invinc", invinc);
+	if (grow || Music_Playing("grow"))
+		Music_DelayEnd("grow", grow);
 }
 
 //
@@ -3648,9 +3651,11 @@ boolean P_MoveChaseCamera(player_t *player, camera_t *thiscam, boolean resetcall
 
 	pitch = thiscam->pitch + (angle_t)FixedMul(pitch - thiscam->pitch, camspeed/4);
 
+#ifdef HWRENDER
 	if (rendermode == render_opengl && !cv_glshearing.value)
 		distxy = FixedMul(dist, FINECOSINE((pitch>>ANGLETOFINESHIFT) & FINEMASK));
 	else
+#endif
 		distxy = dist;
 	distz = -FixedMul(dist, FINESINE((pitch>>ANGLETOFINESHIFT) & FINEMASK));
 

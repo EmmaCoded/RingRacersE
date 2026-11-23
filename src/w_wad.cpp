@@ -123,6 +123,7 @@ static void PrintMD5String(const UINT8 *md5, char *buf);
 #endif
 
 // W_Shutdown
+
 // Closes all of the WAD files before quitting
 // If not done on a Mac then open wad files
 // can prevent removable media they are on from
@@ -133,7 +134,7 @@ void W_Shutdown(void)
 	{
 		wadfile_t *wad = wadfiles[numwadfiles];
 
-		fclose(wad->handle);
+		if (wad->handle) fclose(wad->handle);
 		Z_Free(wad->filename);
 		while (wad->numlumps--)
 		{
@@ -698,6 +699,7 @@ static lumpinfo_t* ResGetLumpsZip (FILE* handle, UINT16* nlmp)
 
 	size_t offset = 0;
 
+
 	for (i = 0; i < numlumps; i++, lump_p++)
 	{
 		zentry_t *zentry = reinterpret_cast<zentry_t*>(cdir + offset);
@@ -819,6 +821,7 @@ UINT16 W_InitFile(const char *filename, boolean mainfile, boolean startup, const
 #endif
 	UINT8 md5sum[16];
 	int important;
+
 
 	if (!(refreshdirmenu & REFRESHDIR_ADDFILE))
 		refreshdirmenu = REFRESHDIR_NORMAL|REFRESHDIR_ADDFILE; // clean out cons_alerts that happened earlier
@@ -2868,6 +2871,7 @@ virtlump_t* vres_Find(const virtres_t* vres, const char* name)
  * \return Patch data
  *
  */
+
 void *vres_GetPatch(virtlump_t *vlump, INT32 tag)
 {
 	patch_t *patch;

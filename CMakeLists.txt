@@ -92,6 +92,20 @@ else()
 endif()
 
 
+# Ring Racers E: RRE_STATIC_DEPS (MinGW) links SDL2, curl, libpng, zlib and Opus statically,
+# so the Windows build is a single .exe with no DLLs next to it.
+option(RRE_STATIC_DEPS "MinGW: link all external libraries statically (single .exe)" OFF)
+if(RRE_STATIC_DEPS AND MINGW)
+	set(CMAKE_FIND_LIBRARY_SUFFIXES ".a")
+	set(CURL_NO_CURL_CMAKE ON)
+	set(PNG_USE_STATIC_LIBS ON)
+	find_package(PkgConfig REQUIRED)
+	execute_process(COMMAND ${PKG_CONFIG_EXECUTABLE} --static --libs libcurl libpng opus
+		OUTPUT_VARIABLE RRE_STATIC_LIBS OUTPUT_STRIP_TRAILING_WHITESPACE)
+	separate_arguments(RRE_STATIC_LIBS)
+	message(STATUS "Static dependencies: ${RRE_STATIC_LIBS}")
+endif()
+
 find_package(ZLIB REQUIRED)
 find_package(PNG REQUIRED)
 find_package(SDL2 CONFIG REQUIRED)

@@ -108,6 +108,7 @@ void *hwSym(const char *funcName,void *handle)
 	GETFUNC(SetShaderInfo);
 	GETFUNC(LoadCustomShader);
 	GETFUNC(ResetRenderState);
+	GETFUNC(DrawStaticPool);
 
 #else //HWRENDER
 	if (0 == strcmp("FinishUpdate", funcName))

@@ -60,6 +60,7 @@
 
 // So that the screenshot menu auto-updates...
 #include "k_menu.h"
+#include "am_map.h" // automapactive, AM_MinimapGenerate, minigen_t
 
 #ifdef HWRENDER
 #include "hardware/hw_main.h"
@@ -1107,11 +1108,10 @@ static inline boolean M_PNGLib(void)
 	aPNG_set_acTL = (P_png_set_acTL) hwSym("png_set_acTL", pnglib);
 	aPNG_write_frame_head = (P_png_write_frame_head) hwSym("png_write_frame_head", pnglib);
 	aPNG_write_frame_tail = (P_png_write_frame_tail) hwSym("png_write_frame_tail", pnglib);
-#endif
-#ifdef _WIN32
-	aPNG_set_acTL = (P_png_set_acTL) GetProcAddress("png_set_acTL", pnglib);
-	aPNG_write_frame_head = (P_png_write_frame_head) GetProcAddress("png_write_frame_head", pnglib);
-	aPNG_write_frame_tail = (P_png_write_frame_tail) GetProcAddress("png_write_frame_tail", pnglib);
+#elif defined(_WIN32) // correct order (module, name); with SDL hwSym already does it
+	aPNG_set_acTL = (P_png_set_acTL) GetProcAddress((HMODULE)pnglib, "png_set_acTL");
+	aPNG_write_frame_head = (P_png_write_frame_head) GetProcAddress((HMODULE)pnglib, "png_write_frame_head");
+	aPNG_write_frame_tail = (P_png_write_frame_tail) GetProcAddress((HMODULE)pnglib, "png_write_frame_tail");
 #endif
 	return (aPNG_set_acTL && aPNG_write_frame_head && aPNG_write_frame_tail);
 #endif

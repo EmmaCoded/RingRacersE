@@ -30,6 +30,9 @@ rhi::Rhi* get_rhi(rhi::Handle<rhi::Rhi> handle);
 
 hwr2::HardwareState* main_hardware_state();
 
+// Signals that the RHI was replaced (live API switch); the hwr2 state is rebuilt on the next frame.
+void invalidate_rhi();
+
 } // namespace srb2::sys
 
 extern "C" {

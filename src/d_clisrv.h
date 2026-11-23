@@ -300,7 +300,13 @@ struct clientconfig_pak
 	UINT8 availabilities[MAXAVAILABILITY];
 	uint8_t challengeResponse[MAXSPLITSCREENPLAYERS][SIGNATURELENGTH];
 	player_config_t player_configs[MAXSPLITSCREENPLAYERS];
+	UINT8 rrlowend; // Ring Racers E: the client uses low-end mode (only read if application == RR_NETAPP)
 } ATTRPACK;
+
+// Ring Racers E: free bits of serverinfo.kartvars
+#define SV_RRLOWEND 0x04	// the E server plays in low-end mode
+#define SV_RRE 0x08		// the server is Ring Racers E (application is still "RingRacers" so that the
+				// original Ring Racers gets to ask to join and receives the "Ring Racers E only" notice)
 
 #define SV_SPEEDMASK 0x03		// used to send kartspeed
 #define SV_DEDICATED 0x40		// server is dedicated

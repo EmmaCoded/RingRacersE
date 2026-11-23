@@ -24,8 +24,9 @@ menuitem_t OPTIONS_Video[] =
 		NULL, {NULL}, 0, 0},
 
 #if (defined (__unix__) && !defined (MSDOS)) || defined (UNIXCOMMON) || defined (HAVE_SDL)
-	{IT_STRING | IT_CVAR, "Fullscreen", "Play on the big screen or in a small window.",
-		NULL, {.cvar = &cv_fullscreen}, 0, 0},
+	// Ring Racers E: Window / Fullscreen / Borderless (F11 toggles with Window without changing this)
+	{IT_STRING | IT_CVAR, "Display Mode", "Window, Fullscreen or Borderless. F11 toggles with Window.",
+		NULL, {.cvar = &cv_rrdisplaymode}, 0, 0},
 #endif
 
 	{IT_STRING | IT_CVAR, "V-Sync", "Reduce image tearing and judder.",

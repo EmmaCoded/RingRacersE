@@ -42,7 +42,8 @@ typedef enum
 	gb_back,
 	gb_ls,
 	gb_rs,
-	gb_dpad
+	gb_dpad,
+	gb_touch, // touch screen
 } generic_buttons_e;
 
 typedef enum
@@ -79,6 +80,7 @@ static const srb2::HashMap<INT32, char> standardpad = {
 	{nc_back, gb_back},
 	{nc_ls, gb_ls},
 	{nc_rs, gb_rs},
+	{nc_touch, gb_touch},
 };
 
 // Standard gamepad, but evil Nintendo layout flip was applied by your
@@ -96,6 +98,7 @@ static const srb2::HashMap<INT32, char> flippedpad = {
 	{nc_back, gb_back},
 	{nc_ls, gb_ls},
 	{nc_rs, gb_rs},
+	{nc_touch, gb_touch},
 };
 
 // Saturn Type A - Retrobit Wired Dinput, RB RT LB LT (CZLR)
@@ -289,7 +292,8 @@ public:
 		back,
 		ls,
 		rs,
-		dpad
+		dpad,
+		touch
 	};
 
 	class TextElement

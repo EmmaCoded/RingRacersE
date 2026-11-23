@@ -238,7 +238,7 @@ void F_LoadCreditsDefinitions(void)
 			}
 
 			slide.play_demo_afterwards = slide_obj.value("demo", false);
-			slide.fade_out_music = slide_obj.value("fade_out_music", 0);
+			slide.fade_out_music = slide_obj.value("fade_out_music", static_cast<int32_t>(0));
 
 			g_credits_slides.push_back( slide );
 		}

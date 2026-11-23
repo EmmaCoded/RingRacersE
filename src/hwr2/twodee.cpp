@@ -15,6 +15,7 @@
 using namespace srb2;
 using namespace hwr2;
 
+
 Twodee::Twodee() = default;
 Twodee::Twodee(const Twodee&) = default;
 Twodee::Twodee(Twodee&&) noexcept = default;

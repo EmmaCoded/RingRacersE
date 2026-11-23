@@ -331,6 +331,7 @@ UINT8 *R_GenerateTexture(size_t texnum)
 	texture = textures[texnum];
 	I_Assert(texture != NULL);
 
+
 	// allocate texture column offset lookup
 
 	// single-patch textures can have holes in them and may be used on
@@ -598,7 +599,7 @@ static void R_ConvertBrightmapColumn(UINT8 *p, const column_t *tcol, const colum
 		// texture column, so pad it with black
 		// pixels.
 
-		n = std::max(0, std::min(btop, tbot) - y);
+		n = std::max<INT32>(0, std::min<INT32>(btop, tbot) - y);
 		memset(&p[y - ttop], TRANSPARENTPIXEL, n);
 		y += n;
 
@@ -610,7 +611,7 @@ static void R_ConvertBrightmapColumn(UINT8 *p, const column_t *tcol, const colum
 		// Copy parts of the brightmap column which
 		// line up with the texture column.
 
-		n = std::max(0, std::min(bbot, tbot) - y);
+		n = std::max<INT32>(0, std::min<INT32>(bbot, tbot) - y);
 		memcpy(&p[y - ttop], (const UINT8*)bcol + 3 + (y - btop), n);
 		y += n;
 
@@ -1515,6 +1516,7 @@ static void R_FinishLoadingTextures(INT32 add)
 	g_texturenum_dbgline = R_CheckTextureNumForName("DBGLINE");
 }
 
+
 //
 // R_LoadTextures
 // Initializes the texture list with the textures from the world map.
@@ -2110,6 +2112,7 @@ INT32 R_CheckTextureNumForName(const char *name)
 		return 0;
 
 	hash = quickncasehash(name, 8);
+
 
 	for (i = 0; i < tidcachelen; i++)
 		if (tidcache[i].hash == hash && !strncasecmp(tidcache[i].name, name, 8))

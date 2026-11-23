@@ -22,23 +22,60 @@ GLMipmap_t *current_brightmap = NULL;
 
 boolean currently_batching = false;
 
+// MEMORY: the batching lists have a FIXED capacity and never grow
+// (they used to double with malloc+memcpy in the middle of a frame: with a full or
+// fragmented heap malloc returned NULL -> crash in Sunbeam Paradise Playground).
+// If a list fills up, what was gathered is drawn (flush) and gathering continues: never
+// realloc, polygons are never skipped. They are allocated once at startup.
+#define BATCH_POLYS 65536
+#define BATCH_VERTS 65536
+#define BATCH_FINAL 65536
+
 FOutVector* finalVertexArray = NULL;// contains subset of sorted vertices and texture coordinates to be sent to gpu
 UINT32* finalVertexIndexArray = NULL;// contains indexes for glDrawElements, taking into account fan->triangles conversion
 //     NOTE have this alloced as 3x finalVertexArray size
-int finalVertexArrayAllocSize = 65536;
-//GLubyte* colorArray = NULL;// contains color data to be sent to gpu, if needed
-//int colorArrayAllocSize = 65536;
-// not gonna use this for now, just sort by color and change state when it changes
-// later maybe when using vertex attributes if it's needed
+static const int finalVertexArrayAllocSize = BATCH_FINAL;
 
 PolygonArrayEntry* polygonArray = NULL;// contains the polygon data from DrawPolygon, waiting to be processed
 int polygonArraySize = 0;
 UINT32* polygonIndexArray = NULL;// contains sorting pointers for polygonArray
-int polygonArrayAllocSize = 65536;
+static const int polygonArrayAllocSize = BATCH_POLYS;
 
 FOutVector* unsortedVertexArray = NULL;// contains unsorted vertices and texture coordinates from DrawPolygon
 int unsortedVertexArraySize = 0;
-int unsortedVertexArrayAllocSize = 65536;
+static const int unsortedVertexArrayAllocSize = BATCH_VERTS;
+
+// Log statistics ([BATCH]): per-frame peak and flushes caused by a full list.
+static int batch_frame_polys = 0, batch_frame_verts = 0;
+static int batch_peak_polys = 0, batch_peak_verts = 0;
+static UINT32 batch_flushes = 0, batch_direct = 0;
+extern "C" void HWR_BatchStats(int *peakPolys, int *peakVerts, unsigned *flushes, unsigned *direct)
+{
+	*peakPolys = batch_peak_polys; *peakVerts = batch_peak_verts;
+	*flushes = batch_flushes; *direct = batch_direct;
+	batch_peak_polys = batch_peak_verts = 0;
+}
+
+static void batch_init_arrays(void)
+{
+	if (finalVertexArray)
+		return;
+	finalVertexArray = (FOutVector *)malloc(finalVertexArrayAllocSize * sizeof(FOutVector));
+	finalVertexIndexArray = (UINT32 *)malloc(finalVertexArrayAllocSize * 3 * sizeof(UINT32));
+	polygonArray = (PolygonArrayEntry *)malloc(polygonArrayAllocSize * sizeof(PolygonArrayEntry));
+	polygonIndexArray = (UINT32 *)malloc(polygonArrayAllocSize * sizeof(UINT32));
+	unsortedVertexArray = (FOutVector *)malloc(unsortedVertexArrayAllocSize * sizeof(FOutVector));
+	if (!finalVertexArray || !finalVertexIndexArray || !polygonArray || !polygonIndexArray || !unsortedVertexArray)
+		I_Error("HWR_StartBatching: no memory for batching arrays");
+}
+
+// List full: draw what was gathered so far and keep gathering.
+static void batch_flush(void)
+{
+	HWR_RenderBatches();
+	currently_batching = true;
+	batch_flushes++;
+}
 
 // Enables batching mode. HWR_ProcessPolygon will collect polygons instead of passing them directly to the rendering backend.
 // Call HWR_RenderBatches to render all the collected geometry.
@@ -48,23 +85,23 @@ void HWR_StartBatching(void)
 		I_Error("Repeat call to HWR_StartBatching without HWR_RenderBatches");
 
 	// init arrays if that has not been done yet
-	if (!finalVertexArray)
-	{
-		finalVertexArray = (FOutVector *)malloc(finalVertexArrayAllocSize * sizeof(FOutVector));
-		finalVertexIndexArray = (UINT32 *)malloc(finalVertexArrayAllocSize * 3 * sizeof(UINT32));
-		polygonArray = (PolygonArrayEntry *)malloc(polygonArrayAllocSize * sizeof(PolygonArrayEntry));
-		polygonIndexArray = (UINT32 *)malloc(polygonArrayAllocSize * sizeof(UINT32));
-		unsortedVertexArray = (FOutVector *)malloc(unsortedVertexArrayAllocSize * sizeof(FOutVector));
-	}
+	batch_init_arrays();
 
 	currently_batching = true;
+	batch_frame_polys = batch_frame_verts = 0;
 }
 
 // This replaces the direct calls to pfnSetTexture in cases where batching is available.
 // The texture selection is saved for the next HWR_ProcessPolygon call.
 // Doing this was easier than getting a texture pointer to HWR_ProcessPolygon.
+extern GLMipmap_t *rre_lastmip;
+extern GLMipmap_t *rre_lastbright;
+void RRE_StaticCapturePoly(FSurfaceInfo *surf, FOutVector *v, FUINT n, FBITFIELD flags, boolean horizon);
 void HWR_SetCurrentTexture(GLMipmap_t *texture)
 {
+	if (!texture) { rre_lastmip = NULL; rre_lastbright = NULL; }
+	else if (!(texture->flags & TF_BRIGHTMAP)) { rre_lastmip = texture; rre_lastbright = NULL; }
+	else rre_lastbright = texture; // brightmap of the texture that was just selected
 	if (currently_batching)
 	{
 		if (texture != NULL)
@@ -95,34 +132,34 @@ void HWR_SetCurrentTexture(GLMipmap_t *texture)
 // render the polygon immediately.
 void HWR_ProcessPolygon(FSurfaceInfo *pSurf, FOutVector *pOutVerts, FUINT iNumPts, FBITFIELD PolyFlags, int shader, boolean horizonSpecial)
 {
+	RRE_StaticCapturePoly(pSurf, pOutVerts, iNumPts, PolyFlags, horizonSpecial);
 	if (currently_batching)
 	{
 		if (!pSurf)
 			I_Error("Got a null FSurfaceInfo in batching");// nulls should not come in the stuff that batching currently applies to
-		if (polygonArraySize == polygonArrayAllocSize)
+		// list full -> draw what was gathered and continue (never grow)
+		if (polygonArraySize >= polygonArrayAllocSize
+			|| unsortedVertexArraySize + (int)iNumPts > unsortedVertexArrayAllocSize)
+			batch_flush();
+		if ((int)iNumPts > finalVertexArrayAllocSize || (int)iNumPts > unsortedVertexArrayAllocSize)
 		{
-			PolygonArrayEntry* new_array;
-			// ran out of space, make new array double the size
-			polygonArrayAllocSize *= 2;
-			new_array = (PolygonArrayEntry *)malloc(polygonArrayAllocSize * sizeof(PolygonArrayEntry));
-			memcpy(new_array, polygonArray, polygonArraySize * sizeof(PolygonArrayEntry));
-			free(polygonArray);
-			polygonArray = new_array;
-			// also need to redo the index array, dont need to copy it though
-			free(polygonIndexArray);
-			polygonIndexArray = (UINT32 *)malloc(polygonArrayAllocSize * sizeof(UINT32));
+			// huge polygon (does not happen in practice): draw it directly with its texture
+			batch_direct++;
+			if (shader)
+				HWD.pfnSetShader(shader);
+			if (!(PolyFlags & PF_NoTexture))
+			{
+				HWD.pfnSetTexture(current_texture);
+				if (current_brightmap)
+					HWD.pfnSetTexture(current_brightmap);
+			}
+			HWD.pfnDrawPolygon(pSurf, pOutVerts, iNumPts, PolyFlags);
+			return;
 		}
-
-		while (unsortedVertexArraySize + (int)iNumPts > unsortedVertexArrayAllocSize)
-		{
-			FOutVector* new_array;
-			// need more space for vertices in unsortedVertexArray
-			unsortedVertexArrayAllocSize *= 2;
-			new_array = (FOutVector *)malloc(unsortedVertexArrayAllocSize * sizeof(FOutVector));
-			memcpy(new_array, unsortedVertexArray, unsortedVertexArraySize * sizeof(FOutVector));
-			free(unsortedVertexArray);
-			unsortedVertexArray = new_array;
-		}
+		batch_frame_polys++;
+		batch_frame_verts += (int)iNumPts;
+		if (batch_frame_polys > batch_peak_polys) batch_peak_polys = batch_frame_polys;
+		if (batch_frame_verts > batch_peak_verts) batch_peak_verts = batch_frame_verts;
 
 		// add the polygon data to the arrays
 
@@ -363,21 +400,15 @@ void HWR_RenderBatches(void)
 		// before writing, check if there is enough room
 		// using 'while' instead of 'if' here makes sure that there will *always* be enough room.
 		// probably never will this loop run more than once though
-		while (finalVertexWritePos + numVerts > finalVertexArrayAllocSize)
+		// no growing. If it does not fit, draw what was gathered (same state: state
+		// changes already flushed before) and continue from 0. numVerts <= capacity (ProcessPolygon).
+		if (finalVertexWritePos + numVerts > finalVertexArrayAllocSize && finalVertexWritePos > 0)
 		{
-			FOutVector* new_array;
-			unsigned int* new_index_array;
-			finalVertexArrayAllocSize *= 2;
-			new_array = (FOutVector *)malloc(finalVertexArrayAllocSize * sizeof(FOutVector));
-			memcpy(new_array, finalVertexArray, finalVertexWritePos * sizeof(FOutVector));
-			free(finalVertexArray);
-			finalVertexArray = new_array;
-			// also increase size of index array, 3x of vertex array since
-			// going from fans to triangles increases vertex count to 3x
-			new_index_array = (UINT32 *)malloc(finalVertexArrayAllocSize * 3 * sizeof(UINT32));
-			memcpy(new_index_array, finalVertexIndexArray, finalIndexWritePos * sizeof(UINT32));
-			free(finalVertexIndexArray);
-			finalVertexIndexArray = new_index_array;
+			HWD.pfnDrawIndexedTriangles(&currentSurfaceInfo, finalVertexArray, finalIndexWritePos, currentPolyFlags, finalVertexIndexArray);
+			ps_hw_numcalls++;
+			ps_hw_numverts += finalIndexWritePos;
+			finalVertexWritePos = 0;
+			finalIndexWritePos = 0;
 		}
 		// write the vertices of the polygon
 		memcpy(&finalVertexArray[finalVertexWritePos], &unsortedVertexArray[polygonArray[index].vertsIndex],

@@ -16,6 +16,7 @@
 #include "../mserv.h"
 #include "../v_video.h"
 #include "../m_easing.h"
+#include "../rr_nete.h" // Ring Racers E
 
 static void draw_routine(void)
 {
@@ -42,14 +43,15 @@ static void draw_routine(void)
 		);
 	}
 
-	V_DrawRightAlignedThinString(
-		294 + tx,
-		98,
-		!CV_IsSetToDefault(&cv_advertise) ? warningflags : highlightflags,
-		va("(Public: %s)", cv_advertise.string)
-	);
 
-	M_DrawMasterServerReminder();
+	RRNet_DrawMyIPsHint(44, BASEVIDHEIGHT - 10, true); // Ring Racers E: Y = My IP Addresses
+}
+
+// Ring Racers E: Y = My IP Addresses (a menu item did not fit in the box)
+static boolean input_routine(INT32 key)
+{
+	(void)key;
+	return RRNet_MyIPsInput(0);
 }
 
 static void tick_routine(void)
@@ -109,7 +111,7 @@ menu_t PLAY_MP_HostDef = {
 	tick_routine,
 	NULL,
 	M_MPResetOpts,
-	NULL
+	input_routine
 };
 
 void M_PopupMasterServerRules(void)

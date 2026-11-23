@@ -24,9 +24,6 @@ menuitem_t OPTIONS_Server[] =
 	{IT_STRING | IT_CVAR | IT_CV_STRING, "Server Contact", "How you should be contacted for Master Server moderation.",
 		NULL, {.cvar = &cv_server_contact}, 0, 0},
 
-	{IT_STRING | IT_CVAR, "Make Public", "Display your server in the Browser for other players to join.",
-		NULL, {.cvar = &cv_advertise}, 0, 0},
-
 
 	{IT_HEADER, "Players...", NULL,
 		NULL, {NULL}, 0, 0},

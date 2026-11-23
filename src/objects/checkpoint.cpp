@@ -234,6 +234,7 @@ struct Checkpoint : mobj_t
 		}
 	}
 
+
 	void twirl(angle_t dir, fixed_t multiplier)
 	{
 		var(0);
@@ -435,7 +436,8 @@ private:
 
 		between = R_PointToDist2(0, z, between, other()->z);
 
-		for (; ofs < between; ofs += 2 * r)
+		const fixed_t stepr = 2 * r;
+		for (; ofs < between; ofs += stepr)
 		{
 			spawn_sparkle(
 				{x + FixedMul(ofs, step.x), y + FixedMul(ofs, step.y), z + (kSparkleZ * scale) + FixedMul(ofs, step.z)},

@@ -56,7 +56,9 @@ static void pool_executor(
 {
 	{
 		srb2::String thread_name = srb2::format("Thread Pool Thread {}", thread_index);
+#ifdef TRACY_ENABLE
 		tracy::SetThreadName(thread_name.c_str());
+#endif
 	}
 
 	int spins = 0;
@@ -308,7 +310,7 @@ void I_ThreadPoolInit(void)
 		thread_count -= 1;
 	}
 
-	if (M_CheckParm("-singlethreaded"))
+	if (thread_count == 0 || M_CheckParm("-singlethreaded"))
 	{
 		g_main_threadpool = std::make_unique<ThreadPool>();
 	}

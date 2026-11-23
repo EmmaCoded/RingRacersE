@@ -247,7 +247,9 @@ struct staffsync_t
 	UINT32 rngerror_presync[32];
 	UINT32 rngerror_postsync[32];
 };
-extern staffsync_t staffsync_results[1024];
+// staffsync (developer ghost test) results table
+#define RR_STAFFSYNC_MAX 1024
+extern staffsync_t staffsync_results[RR_STAFFSYNC_MAX];
 
 // ========================================
 // Internal parameters for sound rendering.

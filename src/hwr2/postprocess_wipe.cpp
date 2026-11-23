@@ -197,8 +197,8 @@ void PostprocessWipePass::graphics(Rhi& rhi)
 
 	rhi.set_rasterizer_state(desc);
 	rhi.set_uniform("u_projection", glm::scale(glm::identity<glm::mat4>(), glm::vec3(2.f, 2.f, 1.f)));
-	rhi.set_uniform("u_wipe_colorize_mode", static_cast<int32_t>(wipe_color_mode_));
-	rhi.set_uniform("u_wipe_encore_swizzle", static_cast<int32_t>(wipe_swizzle_));
+	rhi.set_uniform("u_wipe_colorize_mode", static_cast<int>(wipe_color_mode_));
+	rhi.set_uniform("u_wipe_encore_swizzle", static_cast<int>(wipe_swizzle_));
 	rhi.set_sampler("s_sampler0", 0, start_);
 	rhi.set_sampler("s_sampler1", 1, end_);
 	rhi.set_sampler("s_sampler2", 2, wipe_tex_);

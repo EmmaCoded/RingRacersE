@@ -80,6 +80,12 @@ static boolean init_tcp_driver = false;
 static const char *serverport_name = DEFAULTPORT;
 static const char *clientport_name;/* any port */
 
+// Ring Racers E: server port for the "My IP Addresses" button (NULL = random port with an empty -port)
+const char *I_RR_ServerPort(void)
+{
+	return serverport_name;
+}
+
 #ifdef USE_WINSOCK
 // stupid microsoft makes things complicated
 static char *get_WSAErrorStr(int e)
@@ -1178,7 +1184,7 @@ static boolean SOCK_OpenSocket(void)
 }
 
 // https://github.com/jameds/holepunch/blob/master/holepunch.c#L75
-static int SOCK_IsExternalAddress (const void *p)
+static boolean SOCK_IsExternalAddress (const void *p)
 {
 	const int a = ((const unsigned char*)p)[0];
 	const int b = ((const unsigned char*)p)[1];

@@ -509,7 +509,7 @@ void TwodeeRenderer::flush(Rhi& rhi, Twodee& twodee)
 	));
 	rhi.set_uniform("u_modelview", glm::identity<glm::mat4>());
 	rhi.set_uniform("u_texcoord0_transform", glm::identity<glm::mat3>());
-	rhi.set_uniform("u_sampler0_is_indexed_alpha", static_cast<int32_t>(1));
+	rhi.set_uniform("u_sampler0_is_indexed_alpha", static_cast<int>(1));
 	rhi.set_sampler("s_sampler1", 1, palette_tex);
 	for (auto& list : cmd_lists_)
 	{

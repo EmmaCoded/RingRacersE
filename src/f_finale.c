@@ -900,7 +900,6 @@ void F_IntroTicker(void)
 	{
 		ResetSkipSequences();
 		M_StartControlPanel();
-		CV_StealthSetValue(&cv_advertise, 1);
 		currentMenu = &PLAY_MP_OptSelectDef;
 		return;
 	}
@@ -1868,6 +1867,7 @@ void F_VersionDrawer(void)
 	V_DrawThinString(vid.dupx, texty, trans|f, str);\
 	texty -= 10*vid.dupy;\
 }
+	addtext(trans, "Ring Racers E v2.4E"); // Ring Racers E (without the "v2.5" line below)
 	if (customversionstring[0] != '\0')
 	{
 		addtext(0, customversionstring);
@@ -1893,13 +1893,10 @@ void F_VersionDrawer(void)
 		}
 
 #else // Regular build
-		addtext(trans, va("%s", VERSIONSTRING));
+		; // Ring Racers E: the version is already shown above ("v2.4E"); the internal SRB2VERSION is still 2.5
 #endif
 
-		if (compuncommitted)
-		{
-			addtext(V_REDMAP|V_STRINGDANCE, "! UNCOMMITTED CHANGES !");
-		}
+		// No "UNCOMMITTED CHANGES" notice
 	}
 #undef addtext
 }

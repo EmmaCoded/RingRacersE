@@ -1875,6 +1875,7 @@ extern boolean demosynced;
 // G_Ticker
 // Make ticcmd_ts for the players.
 //
+
 void G_Ticker(boolean run)
 {
 	UINT32 i;

@@ -15,24 +15,26 @@
 
 #include <ctype.h>
 
-int strupr(char *n)
+char *strupr(char *n)
 {
+	char *ret = n;
 	while (*n != '\0')
 	{
 		*n = toupper(*n);
 		n++;
 	}
-	return 1;
+	return ret;
 }
 
-int strlwr(char *n)
+char *strlwr(char *n)
 {
+	char *ret = n;
 	while (*n != '\0')
 	{
 		*n = tolower(*n);
 		n++;
 	}
-	return 1;
+	return ret;
 }
 
 #endif

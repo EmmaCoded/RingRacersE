@@ -78,7 +78,7 @@ extern "C" {
 	#define strncasecmp             strnicmp
 	#define strcasecmp              strcmpi
 #endif
-#if (defined (__unix__) && !defined (MSDOS)) || defined(__APPLE__) || defined (UNIXCOMMON)
+#if defined(__unix__) && !defined(MSDOS) || defined(__APPLE__) || defined(UNIXCOMMON)
 	#undef stricmp
 	#define stricmp(x,y) strcasecmp(x,y)
 	#undef strnicmp
@@ -105,8 +105,8 @@ char *nongnu_strcasestr(const char *in, const char *what);
 #endif
 
 #ifndef HAVE_DOSSTR_FUNCS
-int strupr(char *n); // from dosstr.c
-int strlwr(char *n); // from dosstr.c
+char *strupr(char *n); // from dosstr.c
+char *strlwr(char *n); // from dosstr.c
 #endif
 
 #include <stddef.h> // for size_t
@@ -138,7 +138,9 @@ typedef int32_t boolean;
 
 #ifndef __cplusplus
 #ifndef _WIN32
+#ifndef __bool_true_false_are_defined
 enum {false = 0, true = 1};
+#endif
 #else
 #define false FALSE
 #define true TRUE

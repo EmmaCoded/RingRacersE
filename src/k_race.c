@@ -40,6 +40,7 @@
 #include "k_waypoint.h"
 #include "k_bot.h"
 #include "k_hud.h"
+#include "rr_config.h" // RR_LOWEND (low-end mode)
 
 line_t *finishBeamLine = NULL;
 
@@ -308,6 +309,9 @@ static void K_DrawFinishLineBeamForLine(fixed_t offset, angle_t aiming, line_t *
 
 				beam = P_SpawnMobj(x, y, players[displayplayers[i]].mo->z + z, MT_THOK);
 				P_SetMobjState(beam, S_FINISHBEAM1 + spriteframe);
+#ifdef RR_LOWEND_CODE
+				if (RR_LOWEND) beam->tics = 2; // low-end: spawned 1 tic in 2
+#endif
 
 				beam->colorized = true;
 				beam->renderflags = RF_DONTDRAW & ~K_GetPlayerDontDrawFlag(&players[displayplayers[i]]);
@@ -385,6 +389,9 @@ static void K_DrawFinishLineBeamForLine(fixed_t offset, angle_t aiming, line_t *
 				);
 
 				P_SetMobjState(end1, S_FINISHBEAMEND1);
+#ifdef RR_LOWEND_CODE
+				if (RR_LOWEND) end1->tics = 2;
+#endif
 				end1->renderflags = RF_DONTDRAW & ~K_GetPlayerDontDrawFlag(&players[displayplayers[i]]);
 				end1->angle = lineangle;
 
@@ -396,6 +403,9 @@ static void K_DrawFinishLineBeamForLine(fixed_t offset, angle_t aiming, line_t *
 				);
 
 				P_SetMobjState(end2, S_FINISHBEAMEND2);
+#ifdef RR_LOWEND_CODE
+				if (RR_LOWEND) end2->tics = 2;
+#endif
 				end2->renderflags = RF_DONTDRAW & ~K_GetPlayerDontDrawFlag(&players[displayplayers[i]]);
 				end2->angle = lineangle;
 
@@ -428,6 +438,13 @@ void K_RunFinishLineBeam(void)
 	{
 		return;
 	}
+
+#ifdef RR_LOWEND_CODE
+	// Low-end: the finish line rainbow created ~40 MT_THOK per tic
+	// (3.2 ms/tic on slow hardware). Visual only: spawn it 1 tic in 2 with a 2-tic lifetime.
+	if (RR_LOWEND && (leveltime & 1))
+		return;
+#endif
 
 	if (finishBeamLine != NULL)
 	{

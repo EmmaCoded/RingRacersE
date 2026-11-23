@@ -720,20 +720,9 @@ void f_devmode()
 
 void f_proceed()
 {
-#if 0
-	gamedata->gonerlevel = GDGONER_DONE;
-	gamedata->finishedtutorialchallenge = true;
-	M_UpdateUnlockablesAndExtraEmblems(true, true);
-
-	M_ClearMenus(true);
-	S_StartSound(0, sfx_kc42);
-
-	G_SaveGameData();
-#else
 	F_StartIntro();
 	M_ClearMenus(true);
 	M_GonerResetText(true);
-#endif
 }
 
 }; // namespace

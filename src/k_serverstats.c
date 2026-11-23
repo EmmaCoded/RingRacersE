@@ -12,6 +12,7 @@
 /// \file  k_serverstats.c
 /// \brief implements methods for serverside stat tracking.
 
+#include <errno.h>
 #include "doomtype.h"
 #include "d_main.h" // pandf
 #include "byteptr.h" // READ/WRITE macros

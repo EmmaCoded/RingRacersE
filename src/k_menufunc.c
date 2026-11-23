@@ -16,6 +16,7 @@
 #endif
 
 #include "k_menu.h"
+#include "k_profiles.h"
 
 #include "doomdef.h"
 #include "d_main.h"
@@ -26,6 +27,8 @@
 #include "f_finale.h"
 #include "m_misc.h"
 #include "m_cond.h"
+#include "m_argv.h" // -rrmenutest
+#include "screen.h" // cv_rrrenderer (-rrswitchtest)
 #include "music.h"
 
 #ifdef HAVE_DISCORDRPC
@@ -203,8 +206,11 @@ static void M_ChangeCvar(INT32 choice)
 		choice != -1)
 	{
 		M_StartMessage(
-			"Switching to Legacy GL",
-			"Legacy GL is \x85" "INCOMPLETE and BROKEN.\x80\n"
+			"Switching renderer",
+			"Hardware rendering can make better use\n"
+			"of your PC's hardware, but not every API\n"
+			"is available on every PC, and it does not\n"
+			"guarantee better compatibility than Software.\n"
 			"\n"
 			"ARE YOU SURE?",
 			M_ChangeCvarResponse,
@@ -341,7 +347,7 @@ boolean M_Responder(event_t *ev)
 			case KEY_F11: // Fullscreen
 				// F11 can always be used to toggle
 				// fullscreen, it's a safe key.
-				CV_AddValue(&cv_fullscreen, 1);
+				RR_ToggleDisplayMode(); // Ring Racers E: only the state, not the menu preference
 				return true;
 		}
 	}
@@ -454,7 +460,7 @@ boolean M_Responder(event_t *ev)
 				return true;
 
 			case KEY_F11: // Fullscreen
-				CV_AddValue(&cv_fullscreen, 1);
+				RR_ToggleDisplayMode(); // Ring Racers E: only the state, not the menu preference
 				return true;
 
 			// Spymode on F12 handled in game logic
@@ -838,6 +844,7 @@ void M_StartControlPanel(void)
 			M_GonerBGImplyPassageOfTime();
 		}
 
+
 		if (M_GameTrulyStarted() == false)
 		{
 			// Are you ready for the First Boot Experience?
@@ -902,6 +909,7 @@ void M_StartControlPanel(void)
 //
 // M_ClearMenus
 //
+
 void M_ClearMenus(boolean callexitmenufunc)
 {
 	if (!menuactive)
@@ -1412,6 +1420,50 @@ void M_Ticker(void)
 	INT32 i;
 
 	HU_TickSongCredits();
+
+	// Menu test without a keyboard: -rrmenutest N opens Video > Advanced with the cursor on renderer N
+	{
+		static boolean rrmp = false;
+		static INT32 rrmp_tics = 0;
+		// -rrswitchtest 9,7,1 = with the menu open, sets cv_rrrenderer to each value every 6 s (live API switch)
+		static INT32 rrcp_tics = 0, rrcp_i = 0;
+		if ((gamestate == GS_TITLESCREEN || gamestate == GS_LEVEL) && M_CheckParm("-rrswitchtest") && M_IsNextParm()
+			&& ++rrcp_tics % (6*TICRATE) == 0)
+		{
+			const char *lst = M_GetNextParm();
+			INT32 k = 0;
+			while (*lst && k < rrcp_i)
+				if (*lst++ == ',')
+					k++;
+			if (*lst)
+			{
+				CONS_Printf("[TEST] switch %d -> renderer %d\n", rrcp_i, atoi(lst));
+				const boolean wasopen = menuactive;
+				if (!wasopen)
+					M_StartControlPanel(); // the live switch only happens with the menu open
+				CV_SetValue(&cv_rrrenderer, atoi(lst));
+				if (!wasopen)
+					M_ClearMenus(true);
+				rrcp_i++;
+			}
+		}
+		if (!rrmp && (gamestate == GS_TITLESCREEN || gamestate == GS_LEVEL) && ++rrmp_tics > 70 && M_CheckParm("-rrmenutest"))
+		{
+			const INT32 want = M_IsNextParm() ? atoi(M_GetNextParm()) : 0;
+			rrmp = true;
+			M_StartControlPanel();
+			M_InitOptions(0);
+			M_RefreshAdvancedVideoOptions();
+			M_SetupNextMenu(&OPTIONS_VideoAdvancedDef, true);
+			for (i = 0; i < currentMenu->numitems; i++)
+				if ((currentMenu->menuitems[i].status & IT_TYPE) == IT_CALL && currentMenu->menuitems[i].mvar1 == want)
+				{
+					itemOn = i;
+					currentMenu->lastOn = i;
+					break;
+				}
+		}
+	}
 
 	if (!menuactive)
 	{

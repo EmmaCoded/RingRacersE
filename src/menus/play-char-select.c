@@ -20,6 +20,8 @@
 #include "../m_cond.h" // Condition Sets
 #include "../k_color.h"
 #include "../z_zone.h"
+#include "../i_system.h" // I_Error
+#include "../console.h" // CONS_Printf
 
 //#define CHARSELECT_DEVICEDEBUG
 

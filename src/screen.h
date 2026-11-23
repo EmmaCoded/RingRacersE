@@ -129,6 +129,19 @@ extern UINT8 setrenderneeded;
 extern double averageFPS;
 
 void SCR_ChangeRenderer(void);
+extern consvar_t cv_gfxapi; // graphics API (rr_gfxapi.h)
+extern consvar_t cv_rrrenderer; // single menu option (Software/Legacy GL/DX9/DX9Ex/DX11/DX12/Vulkan)
+extern consvar_t cv_rrapirestart; // "safe switch" (always restart when switching API)
+extern consvar_t cv_rrlowend; // low-end mode (lighter game logic)
+extern consvar_t cv_rrborderless; // Ring Racers E: "Borderless Window" (window without borders, screen sized)
+extern consvar_t cv_rrdisplaymode; // "Display Mode" (preference: Window/Fullscreen/Borderless)
+void RR_ToggleDisplayMode(void);  // F11
+void RR_DisplayModeStartup(void); // after the config is loaded
+extern consvar_t cv_rrnetlowend, cv_rrnetlowwait; // low-end mode of the online game (E server netvars)
+#ifdef __cplusplus
+extern "C"
+#endif
+void RRGfx_SyncMenu(void);
 
 extern CV_PossibleValue_t cv_renderer_t[];
 

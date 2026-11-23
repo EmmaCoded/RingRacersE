@@ -17,11 +17,13 @@
 ///        parameters, and call the startup functions.
 
 #include <tracy/tracy/Tracy.hpp>
+#include "rr_config.h"  // test options in a single file
 
 #if (defined (__unix__) && !defined (MSDOS)) || defined(__APPLE__) || defined (UNIXCOMMON)
 #include <sys/stat.h>
 #include <sys/types.h>
 #endif
+
 
 #ifdef __GNUC__
 #include <unistd.h> // for getcwd
@@ -64,6 +66,7 @@
 #include "m_cheat.h"
 #include "y_inter.h"
 #include "p_local.h" // chasecam
+#include "d_netcmd.h" // cv_skin
 #include "m_misc.h" // screenshot functionality
 #include "deh_tables.h" // Dehacked list test
 #include "m_cond.h" // condition initialization
@@ -96,6 +99,7 @@
 
 #ifdef HWRENDER
 #include "hardware/hw_main.h" // 3D View Rendering
+#include "hardware/rr_cfgsync.h" // Ring Racers E: sync the config with the original game's
 #endif
 
 #include "lua_script.h"
@@ -352,6 +356,10 @@ void D_ProcessEvents(boolean callresponders)
 // draw current display, possibly wiping it from the previous
 //
 
+#define PROF_B(x)
+#define PROF_E(x)
+
+
 // wipegamestate can be set to -1 to force a wipe on the next draw
 // added comment : there is a wipe eatch change of the gamestate
 gamestate_t wipegamestate = GS_LEVEL;
@@ -482,6 +490,7 @@ static bool D_Display(bool world)
 	V_ClearClipRect();
 
 	// do buffered drawing
+	PROF_B(I3DS_PROF_STATE);
 	switch (gamestate)
 	{
 		case GS_TITLESCREEN:
@@ -532,6 +541,7 @@ static bool D_Display(bool world)
 		default:
 			break;
 	}
+	PROF_E(I3DS_PROF_STATE);
 
 	HU_Erase();
 
@@ -632,7 +642,9 @@ static bool D_Display(bool world)
 								topleft = screens[0] + viewwindowy*vid.width + viewwindowx;
 							}
 
+							PROF_B(I3DS_PROF_WORLD);
 							R_RenderPlayerView();
+							PROF_E(I3DS_PROF_WORLD);
 
 							if (i > 0)
 								M_Memcpy(ylookup, ylookup1, viewheight*sizeof (ylookup[0]));
@@ -730,7 +742,9 @@ static bool D_Display(bool world)
 				}
 				case GS_TITLESCREEN:
 				{
+					PROF_B(I3DS_PROF_STATE);
 					F_TitleScreenDrawer();
+					PROF_E(I3DS_PROF_STATE);
 					break;
 				}
 				case GS_CEREMONY:
@@ -766,7 +780,9 @@ static bool D_Display(bool world)
 #ifdef HAVE_THREADS
 	I_lock_mutex(&k_menu_mutex);
 #endif
+	PROF_B(I3DS_PROF_MENU);
 	M_Drawer(); // menu is drawn even on top of everything
+	PROF_E(I3DS_PROF_MENU);
 #ifdef HAVE_THREADS
 	I_unlock_mutex(k_menu_mutex);
 #endif
@@ -855,6 +871,7 @@ static bool D_Display(bool world)
 	return ranwipe;
 }
 
+
 // =========================================================================
 // D_SRB2Loop
 // =========================================================================
@@ -925,6 +942,7 @@ void D_SRB2Loop(void)
 	{
 		// capbudget is the minimum precise_t duration of a single loop iteration
 		precise_t capbudget;
+		PROF_B(I3DS_PROF_START);
 		precise_t enterprecise = I_GetPreciseTime();
 		precise_t finishprecise = enterprecise;
 
@@ -985,7 +1003,10 @@ void D_SRB2Loop(void)
 			// process tics (but maybe not if realtic == 0)
 			{
 				ZoneScopedN("TryRunTics");
+				PROF_E(I3DS_PROF_START);
+				PROF_B(I3DS_PROF_TICS);
 				TryRunTics(realtics);
+				PROF_E(I3DS_PROF_TICS);
 			}
 
 			if (lastdraw || singletics || gametic > rendergametic)
@@ -1084,13 +1105,16 @@ void D_SRB2Loop(void)
 					world = false;
 			}
 
+			PROF_B(I3DS_PROF_DISPLAY);
 			ranwipe = D_Display(world);
+			PROF_E(I3DS_PROF_DISPLAY);
 		}
 
 		if ((moviemode || takescreenshot) && rendermode != render_none)
 			I_CaptureVideoFrame();
 
 		// consoleplayer -> displayplayers (hear sounds from viewpoint)
+		PROF_B(I3DS_PROF_MISC);
 		S_UpdateSounds(); // move positional sounds
 		NetVoiceUpdate(); // update voice recording whenever possible
 		if (realtics > 0 || singletics)
@@ -1110,6 +1134,7 @@ void D_SRB2Loop(void)
 
 		Music_Tick();
 		S_UpdateVoicePositionalProperties();
+		PROF_E(I3DS_PROF_MISC);
 
 		// Fully completed frame made.
 		finishprecise = I_GetPreciseTime();
@@ -1202,7 +1227,9 @@ void D_SRB2Loop(void)
 
 			if (elapsed > 0 && (INT64)capbudget > elapsed && !vsync_with_match_refresh)
 			{
+				PROF_B(I3DS_PROF_VBLANK);
 				I_SleepDuration(capbudget - (finishprecise - enterprecise));
+				PROF_E(I3DS_PROF_VBLANK);
 			}
 		}
 		// Capture the time once more to get the real delta time.
@@ -1225,7 +1252,9 @@ void D_ClearState(void)
 
 	// okay, stop now
 	// (otherwise the game still thinks we're playing!)
+#ifdef HAVE_CURL // builds without curl
 	CURLAbortFile();
+#endif
 	SV_StopServer();
 	SV_ResetServer();
 	serverlistultimatecount = 0;
@@ -1411,7 +1440,7 @@ static void IdentifyVersion(void)
 {
 	const char *srb2waddir = NULL;
 
-#if (defined (__unix__) && !defined (MSDOS)) || defined (UNIXCOMMON) || defined (HAVE_SDL)
+#if defined(__unix__) && !defined(MSDOS) || defined(UNIXCOMMON) || defined(HAVE_SDL)
 	// change to the directory where 'bios.pk3' is found
 	srb2waddir = I_LocateWad();
 #endif
@@ -1669,6 +1698,7 @@ void D_SRB2Main(void)
 		}
 
 		configfile[sizeof configfile - 1] = '\0';
+		RR_CfgSync(configfile, sizeof configfile); // Ring Racers E: its own config, synced with the original game's
 	}
 
 	// If config isn't writable, tons of behavior will be broken.
@@ -1837,6 +1867,7 @@ void D_SRB2Main(void)
 
 	// HACK: Refer to https://git.do.srb2.org/KartKrew/RingRacers/-/merge_requests/29#note_61574
 	partadd_earliestfile = numwadfiles;
+
 	W_InitMultipleFiles(startuppwads, num_startuppwads, true);
 
 	// Only search for pwad maps and reload graphics if we actually have a pwad added
@@ -1859,6 +1890,7 @@ void D_SRB2Main(void)
 
 	//--------------------------------------------------------- CONFIG.CFG
 	M_FirstLoadConfig(); // WARNING : this do a "COM_BufExecute()"
+	RR_DisplayModeStartup(); // Ring Racers E: display mode chosen in the menu
 
 	// Load Profiles now that default controls have been defined
 	PR_LoadProfiles();	// load control profiles
@@ -1913,7 +1945,7 @@ void D_SRB2Main(void)
 		g_voice_disabled = true;
 	}
 
-	if (M_CheckParm("-noaudio")) // combines -nosound and -nomusic
+	if (M_CheckParm("-noaudio") || M_CheckParm("-testwindow")) // combines -nosound and -nomusic (-testwindow = no audio)
 	{
 		sound_disabled = true;
 		digital_disabled = true;
@@ -2296,6 +2328,7 @@ void D_SRB2Main(void)
 
 				G_SetUsedCheats();
 			}
+
 
 			D_MapChange(pstartmap, gametype, (cv_kartencore.value == 1), true, 0, false, false);
 		}

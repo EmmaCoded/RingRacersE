@@ -1112,6 +1112,7 @@ void G_DefineDefaultControls(void)
 	gamecontroldefault[gc_left ][2] = KEY_AXIS1+0; // Axis X-
 	gamecontroldefault[gc_right][2] = KEY_AXIS1+1; // Axis X+
 
+
 	#ifdef DEVELOP
 		gamecontroldefault[gc_console][0] = '`';
 	#endif

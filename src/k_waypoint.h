@@ -278,6 +278,10 @@ boolean K_PathfindToWaypoint(
 	const boolean     useshortcuts,
 	const boolean     huntbackwards);
 
+// Cached version (low-end mode only): total distance to `fin` without shortcuts or going backwards.
+boolean K_PathDistToFinishCached(waypoint_t *src, waypoint_t *fin, UINT32 *totaldist);
+void K_PathCacheInvalidate(void);
+
 
 /*--------------------------------------------------
 	boolean K_PathfindThruCircuit(

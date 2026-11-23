@@ -325,6 +325,7 @@ void SCR_Startup(void)
 		return;
 	}
 
+
 	vid.modenum = 0;
 
 	V_Init();
@@ -523,6 +524,7 @@ void SCR_CalculateFPS(void)
 	// Direct, unsampled counter.
 	averageFPS = 1.0 / frameElapsed;
 #endif
+
 }
 
 void SCR_DisplayTicRate(void)

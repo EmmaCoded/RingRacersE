@@ -531,6 +531,7 @@ void P_SpawnItemPattern(mapthing_t *mthing);
 void P_SpawnItemLine(mapthing_t *mt1, mapthing_t *mt2);
 void P_SpawnHoopOfSomething(fixed_t x, fixed_t y, fixed_t z, fixed_t radius, INT32 number, mobjtype_t type, angle_t rotangle);
 void P_SpawnPrecipitation(void);
+void RRE_PrecipFollow(void); // Ring Racers E: precipitation that follows the camera (low-end mode)
 void P_SpawnParaloop(fixed_t x, fixed_t y, fixed_t z, fixed_t radius, INT32 number, mobjtype_t type, statenum_t nstate, angle_t rotangle, boolean spawncenter);
 void *P_CreateFloorSpriteSlope(mobj_t *mobj);
 void P_RemoveFloorSpriteSlope(mobj_t *mobj);

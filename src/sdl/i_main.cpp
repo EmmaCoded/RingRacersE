@@ -157,8 +157,8 @@ static void init_exchndl()
 
 	if (exchndl_module == NULL)
 	{
-		I_Error("exchndl.dll or mgwhelp.dll is missing, RPT files cannot be generated.\n"
-			"If you NEED to run without them, use -noexchndl.");
+		// Ring Racers E: without exchndl/mgwhelp only the .RPT reports are not generated; the game runs normally.
+		return;
 	}
 
 	using PFN_ExcHndlInit = void(*)(void);

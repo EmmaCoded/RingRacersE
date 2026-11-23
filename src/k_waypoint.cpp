@@ -169,6 +169,7 @@ void K_SetWaypointIsEnabled(waypoint_t *waypoint, boolean enabled)
 	else
 	{
 		waypoint->mobj->extravalue1 = enabled ? 1 : 0;
+		K_PathCacheInvalidate();
 	}
 }
 
@@ -2823,6 +2824,7 @@ boolean K_SetupWaypointList(void)
 --------------------------------------------------*/
 void K_ClearWaypoints(void)
 {
+	K_PathCacheInvalidate(); // waypoint pointers are reused by the next map
 	waypointheap     = NULL;
 	firstwaypoint    = NULL;
 	finishline       = NULL;
@@ -3010,4 +3012,38 @@ void K_AdjustWaypointsParameters (void)
 			}
 		}
 	}
+}
+
+// Cached distance to the finish line. K_UpdateDistanceFromFinishLine did a full A*
+// per player and tic; with 8 racers K_PathfindAStar took ~15 ms/tic (profiler, 765). The
+// result only depends on the source waypoint: it is kept for 35 tics and dropped if any
+// waypoint changes (K_SetWaypointIsEnabled / K_ClearWaypoints). Low-end mode only (otherwise it stays exact).
+namespace
+{
+	struct DistCacheEntry { waypoint_t *src; waypoint_t *fin; tic_t stamp; UINT32 gen; UINT32 dist; boolean ok; };
+	DistCacheEntry g_distCache[256];
+	UINT32 g_distGen = 1;
+}
+
+extern "C" void K_PathCacheInvalidate(void) { g_distGen++; }
+
+extern "C" boolean K_PathDistToFinishCached(waypoint_t *src, waypoint_t *fin, UINT32 *totaldist)
+{
+	DistCacheEntry &e = g_distCache[((uintptr_t)src >> 4) & 255];
+	if (e.src == src && e.fin == fin && e.gen == g_distGen && (leveltime - e.stamp) < TICRATE)
+	{
+		if (e.ok && totaldist) *totaldist = e.dist;
+		return e.ok;
+	}
+
+	path_t p = {0};
+	const boolean ok = K_PathfindToWaypoint(src, fin, &p, false, false);
+	e.src = src; e.fin = fin; e.gen = g_distGen; e.stamp = leveltime; e.ok = ok;
+	e.dist = ok ? p.totaldist : 0;
+	if (ok)
+	{
+		if (totaldist) *totaldist = p.totaldist;
+		Z_Free(p.array);
+	}
+	return ok;
 }

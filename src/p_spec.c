@@ -59,6 +59,9 @@
 
 // Not sure if this is necessary, but it was in w_wad.c, so I'm putting it here too -Shadow Hog
 #include <errno.h>
+// (rr_config.h: RR_DIAGPRINT)
+#include "rr_config.h"
+
 
 mobj_t *skyboxviewpnts[16]; // array of MT_SKYBOX viewpoint mobjs
 mobj_t *skyboxcenterpnts[16]; // array of MT_SKYBOX centerpoint mobjs
@@ -74,6 +77,9 @@ typedef struct
 	INT32 basepic;   ///< The start flat number
 	INT32 numpics;   ///< Number of frames in the animation
 	tic_t speed;     ///< Number of tics for which each frame is shown
+	INT32 laststep;  ///< last leveltime/speed applied (-1 = none)
+	tic_t nexttic;   ///< leveltime at which the frame changes (avoids a division every tic)
+	SINT8 used;      ///< -1 not computed, 0 no side of the map uses it, 1 it is used
 } anim_t;
 
 #if defined(_MSC_VER)
@@ -204,6 +210,9 @@ void P_InitPicAnims(void)
 	}
 
 	// Define the last one
+	// If no ANIMDEFS lump was found, animdefs is still NULL - allocate one sentinel slot
+	if (animdefs == NULL)
+		GrowAnimDefs();
 	animdefs[maxanims].istexture = -1;
 	strncpy(animdefs[maxanims].endname, "", 9);
 	strncpy(animdefs[maxanims].startname, "", 9);
@@ -239,9 +248,14 @@ void P_InitPicAnims(void)
 		}
 
 		lastanim->speed = LONG(animdefs[i].speed);
+		lastanim->laststep = -1;
+		lastanim->nexttic = 0;
+		lastanim->used = -1;
 		lastanim++;
 	}
 	lastanim->istexture = -1;
+	{ anim_t *a_; long np_ = 0, rate_ = 0; for (a_ = anims; a_ < lastanim; a_++) { np_ += a_->numpics; rate_ += a_->numpics * 100L / (a_->speed ? a_->speed : 1); }
+	RR_DIAGPRINT("[ANIMS] n=%d, sumpics=%ld, writes/tic x100=%ld\n",(int)(lastanim - anims), np_, rate_); }
 	R_ClearTextureNumCache(false);
 
 	// Clear animdefs now that we're done with it.
@@ -6098,6 +6112,13 @@ void P_UpdateSpecials(void)
 	// ANIMATE TEXTURES
 	for (anim = anims; anim < lastanim; anim++)
 	{
+		// only recompute when the animation frame changes
+		INT32 step;
+		if (anim->laststep != -1 && leveltime < anim->nexttic && leveltime + anim->speed >= anim->nexttic)
+			continue;
+		step = (INT32)(leveltime/anim->speed);
+		anim->nexttic = (step + 1) * anim->speed;
+		anim->laststep = step;
 		for (i = 0; i < anim->numpics; i++)
 		{
 			pic = anim->basepic + ((leveltime/anim->speed + i) % anim->numpics);

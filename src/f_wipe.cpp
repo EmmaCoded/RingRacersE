@@ -36,6 +36,7 @@
 #include "st_stuff.h"
 
 #if NUMSCREENS < 5
+// Ring Racers wipes are GPU post-processing (hwr2); without hwr2 they are skipped.
 #define NOWIPE // do not enable wipe image post processing for ARM, SH and MIPS CPUs
 #endif
 
@@ -43,6 +44,7 @@
 #include "k_menu.h"
 
 using namespace srb2;
+
 
 typedef struct fademask_s {
 	UINT8* mask;
@@ -426,12 +428,12 @@ void F_WipeStageTitle(void)
 void F_RunWipe(UINT8 wipemode, UINT8 wipetype, boolean drawMenu, const char *colormap, boolean reverse, boolean encorewiggle)
 {
 #ifdef NOWIPE
+	(void)colormap;
+	(void)encorewiggle;
 	(void)wipemode;
+	(void)reverse;
 	(void)wipetype;
 	(void)drawMenu;
-	(void)colormap;
-	(void)reverse;
-	(void)encorewiggle;
 #else
 	tic_t nowtime;
 	UINT8 wipeframe = 0;
@@ -558,7 +560,7 @@ void F_RunWipe(UINT8 wipemode, UINT8 wipetype, boolean drawMenu, const char *col
   */
 tic_t F_GetWipeLength(UINT8 wipetype)
 {
-#ifdef NOWIPE
+#if defined(NOWIPE)
 	(void)wipetype;
 	return 0;
 #else
@@ -585,7 +587,7 @@ tic_t F_GetWipeLength(UINT8 wipetype)
   */
 boolean F_WipeExists(UINT8 wipetype)
 {
-#ifdef NOWIPE
+#if defined(NOWIPE)
 	(void)wipetype;
 	return false;
 #else

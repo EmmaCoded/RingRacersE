@@ -207,6 +207,7 @@ struct GenerateBlendTables_State
 static void R_GenerateBlendTables_Core(struct GenerateBlendTables_State *state);
 static void R_GenerateTranslucencyTable(UINT8 *table, RGBA_t* sourcepal, int style, UINT8 blendamt);
 
+
 static void R_AllocateBlendTables(void)
 {
 	INT32 i;
@@ -222,7 +223,7 @@ static void R_AllocateBlendTables(void)
 	blendtables[blendtab_modulate] = static_cast<UINT8 *>(Z_MallocAlign(0x10000, PU_STATIC, NULL, 16));
 }
 
-#ifdef HAVE_THREADS
+#if defined(HAVE_THREADS)
 static void R_GenerateBlendTables_Thread(void *userdata)
 {
 	struct GenerateBlendTables_State *state = static_cast<struct GenerateBlendTables_State *>(userdata);
@@ -260,7 +261,10 @@ void R_InitTranslucencyTables(void)
 
 void R_GenerateBlendTables(void)
 {
-#ifdef HAVE_THREADS
+	// When HAVE_THREADS is defined but threads are stubs, the thread branch
+	// never used the table cache -> blend tables still took 34 s. Builds without
+	// real threads always use the cached branch (blend_<hash>.bin).
+#if defined(HAVE_THREADS)
 	// Allocate copies for the worker thread since the originals can be freed in the main thread.
 	struct GenerateBlendTables_State *state = static_cast<struct GenerateBlendTables_State *>(malloc(sizeof *state));
 	size_t palsize = 256 * sizeof(RGBA_t);

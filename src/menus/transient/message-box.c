@@ -13,6 +13,7 @@
 #include "../../k_menu.h"
 #include "../../v_video.h" // V_ScaledWordWrap, HU_FONT
 #include "../../z_zone.h"
+#include "../../rr_nete.h" // Ring Racers E: IP message box
 
 // message prompt struct
 struct menumessage_s menumessage;
@@ -189,6 +190,11 @@ void M_HandleMenuMessage(void)
 		}
 		default:
 		{
+			// Ring Racers E: the IP message box (opened with Y) also closes with Y
+			if (rrnet_ipmsg_open && M_MenuButtonPressed(pid, MBT_Y))
+				btnok = true;
+			if (btok || btnok)
+				rrnet_ipmsg_open = 0;
 			if (btok || btnok)
 				M_StopMessage(MA_NONE);
 

@@ -451,6 +451,7 @@ patch_t** get_button_patch(Draw::GenericButton type, int ver)
 	X(b)[ver];
 	X(x)[ver];
 	X(y)[ver];
+	X(touch)[ver];
 	X(lb)[ver];
 	X(rb)[ver];
 	X(lt)[ver];

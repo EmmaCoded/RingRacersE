@@ -288,6 +288,7 @@ patch_t *gen_button_lt[2][2];
 patch_t *gen_button_rt[2][2];
 patch_t *gen_button_start[2][2];
 patch_t *gen_button_back[2][2];
+patch_t *gen_button_touch[2][2];
 patch_t *gen_button_ls[2][2];
 patch_t *gen_button_rs[2][2];
 patch_t *gen_button_dpad[2][2];
@@ -1059,6 +1060,7 @@ void K_LoadKartHUDGraphics(void)
 	K_LoadGenericButtonGraphics(gen_button_rs, "R3");
 	K_LoadGenericButtonGraphics(gen_button_start, "S");
 	K_LoadGenericButtonGraphics(gen_button_back, "I");
+	K_LoadGenericButtonGraphics(gen_button_touch, "I");
 
 	HU_UpdatePatch(&kp_voice_localopen, "VOXCLO");
 	for (i = 0; i < 16; i++)
@@ -1335,7 +1337,7 @@ void K_ObjectTracking(trackingResult_t *result, const vector3_t *point, boolean 
 
 	// Calculate FOV adjustments.
 	fovDiff = R_FOV(cameraNum) - baseFov;
-	fov = ((baseFov - fovDiff) / 2) - (stplyr->fovadd / 2);
+	fov = (baseFov - fovDiff) / 2;
 	fovTangent = NEWTAN(FixedAngle(fov));
 
 	if (r_splitscreen == 1)
@@ -1676,7 +1678,7 @@ static void K_drawKartItem(void)
 					break;
 
 				case KITEM_ORBINAUT:
-					localpatch[i] = kp_orbinaut[(offset ? 4 : std::min(amt-1, 3))];
+					localpatch[i] = kp_orbinaut[(offset ? 4 : std::min<INT32>(amt-1, 3))];
 					if (amt > 4)
 						localamt[i] = amt;
 					break;
@@ -1759,7 +1761,7 @@ static void K_drawKartItem(void)
 					break;
 
 				case KITEM_ORBINAUT:
-					localpatch[1] = kp_orbinaut[(offset ? 4 : std::min(stplyr->itemamount-1, 3))];
+					localpatch[1] = kp_orbinaut[(offset ? 4 : std::min<INT32>(stplyr->itemamount-1, 3))];
 					break;
 
 				case KITEM_SPB:
@@ -1900,7 +1902,7 @@ static void K_drawKartItem(void)
 		V_ClearClipRect();
 
 		// A little goofy, but helps with ballhog charge conveyance—you're "loading" them.
-		UINT8 fakeitemamount = stplyr->itemamount - std::min(stplyr->itemamount - 1, (stplyr->ballhogcharge / BALLHOGINCREMENT));
+		UINT8 fakeitemamount = stplyr->itemamount - std::min<INT32>(stplyr->itemamount - 1, (stplyr->ballhogcharge / BALLHOGINCREMENT));
 
 		boolean transflag = V_HUDTRANS;
 
@@ -1951,7 +1953,7 @@ static void K_drawKartItem(void)
 	if (itembar)
 	{
 		const INT32 fill = ((itembar*barlength)/maxl);
-		const INT32 length = std::min(barlength, fill);
+		const INT32 length = std::min<INT32>(barlength, fill);
 		const INT32 height = (offset ? 1 : 2);
 		const INT32 x = (offset ? 17 : 11), y = (offset ? 27 : 35);
 
@@ -1977,7 +1979,7 @@ static void K_drawKartItem(void)
 		INT32 numframes = FLAMESHIELD_MAX;
 		INT32 absolutemax = numframes;
 		INT32 flamemax = stplyr->flamelength;
-		INT32 flamemeter = std::min(static_cast<INT32>(stplyr->flamemeter), flamemax);
+		INT32 flamemeter = std::min<INT32>(static_cast<INT32>(stplyr->flamemeter), flamemax);
 
 		INT32 bf = numframes - stplyr->flamelength;
 		INT32 ff = numframes - ((flamemeter * numframes) / absolutemax);
@@ -2615,7 +2617,7 @@ static void K_DrawKartPositionNum(UINT8 num)
 	{
 		const UINT8 delay = (stplyr->exiting) ? POS_DELAY_TIME : stplyr->positiondelay;
 		const fixed_t add = (scale * 3) >> ((r_splitscreen == 1) ? 1 : 2);
-		scale += std::min((add * (delay * delay)) / (POS_DELAY_TIME * POS_DELAY_TIME), add);
+		scale += std::min<INT32>((add * (delay * delay)) / (POS_DELAY_TIME * POS_DELAY_TIME), add);
 	}
 
 	// pain and suffering defined below
@@ -2705,7 +2707,7 @@ struct PositionFacesInfo
 		if (g_pointlimit == 0)
 			return false;
 		constexpr tic_t kThreshold = 5;
-		return std::max(kThreshold, g_pointlimit) - kThreshold <= top_score();
+		return std::max<INT32>(kThreshold, g_pointlimit) - kThreshold <= top_score();
 	}
 
 	skincolornum_t vomit_color() const
@@ -3309,12 +3311,12 @@ INT32 K_GetTransFlagFromFixed(fixed_t value, boolean midrace)
 {
 	fixed_t base = FRACUNIT;
 
-    value = std::clamp(value, base - FRACUNIT/2, base + FRACUNIT/2);
+    value = std::clamp<INT32>(value, base - FRACUNIT/2, base + FRACUNIT/2);
 
     // Calculate distance from "base""
     fixed_t distance = abs(base - value);
 
-	distance = std::clamp(distance, 0, FRACUNIT/2);
+	distance = std::clamp<fixed_t>(distance, 0, FRACUNIT/2);
 
     // Map the distance to 0-10 range (10 = closest to 1.0, 0 = farthest from 1.0)
     INT32 transLevel = 10 - ((distance * 10) / (FRACUNIT/2));
@@ -3486,7 +3488,7 @@ static void K_drawKartDuelScores(void)
 
 	if (leveltime != duel_lastleveltime[vn])
 	{
-		INT32 slide = std::max(1, abs(targetyouheight - youheight[vn])/3);
+		INT32 slide = std::max<INT32>(1, abs(targetyouheight - youheight[vn])/3);
 		if (targetyouheight > youheight[vn])
 			youheight[vn] += slide;
 		else if (targetyouheight < youheight[vn])
@@ -3597,7 +3599,7 @@ static void K_drawKartDuelScores(void)
 
 	if (duel_lastleveltime[vn] != leveltime) // Trigger the "slide" animation when rawmargin changes.
 	{
-		duel_marginanim[vn] = std::min(duel_marginanim[vn] + 1, 100); // not magic just arbitrary
+		duel_marginanim[vn] = std::min<INT32>(duel_marginanim[vn] + 1, 100); // not magic just arbitrary
 		if (duel_lastmargin[vn] != rawmargin)
 		{
 			duel_marginanim[vn] = 0;
@@ -3633,7 +3635,7 @@ static void K_drawKartDuelScores(void)
 
 		INT32 symbolheadroom = 5; // Maximum # symbols we can "step down".
 		INT32 frac = rawmargin % boostspersymbol; // Used in intermediate calculations.
-		INT32 minsymbol = std::max(1, highsymbol - symbolheadroom); // The lowest symbol that should appear.
+		INT32 minsymbol = std::max<INT32>(1, highsymbol - symbolheadroom); // The lowest symbol that should appear.
 		INT32 symbolheadroominuse = highsymbol - minsymbol; // The # of symbols we are stepping down.
 		INT32 minscore = std::pow(symbolsperupgrade, symbolheadroominuse+1);
 		INT32 maxscore = std::pow(symbolsperupgrade, symbolheadroominuse+2) - 1;
@@ -3704,7 +3706,7 @@ static void K_drawKartDuelScores(void)
 			}
 		}
 
-		INT32 marginspacing = std::min(6, duel_marginanim[vn]);
+		INT32 marginspacing = std::min<INT32>(6, duel_marginanim[vn]);
 		INT32 marginx = ((nummargindigits-1) * marginspacing)/2;
 
 		for (INT32 i = nummargindigits - 1; i >= 0; i--)
@@ -4159,9 +4161,9 @@ static boolean K_drawKartLaps(void)
 			using srb2::Draw;
 			Draw row = Draw(fr+12, fy).flags(V_HUDTRANS|V_SLIDEIN|splitflags).font(Draw::Font::kPing);
 			if (numlaps < 10)
-				row.text("{:01}/{:01}", std::min(stplyr->laps, numlaps), numlaps);
+				row.text("{:01}/{:01}", std::min<INT32>(stplyr->laps, numlaps), numlaps);
 			else
-				row.text("{:02}/{:02}", std::min(stplyr->laps, numlaps), numlaps);
+				row.text("{:02}/{:02}", std::min<INT32>(stplyr->laps, numlaps), numlaps);
 
 			/*
 			V_DrawScaledPatch(fr+12, fy, V_HUDTRANS|V_SLIDEIN|splitflags, fontv[PINGNUM_FONT].font[(stplyr->laps) % 10]);
@@ -4181,11 +4183,11 @@ static boolean K_drawKartLaps(void)
 			Draw row = Draw(LAPS_X+25, LAPS_Y+3).flags(V_HUDTRANS|V_SLIDEIN|splitflags).font(Draw::Font::kThinTimer);
 
 			if (numlaps < 10)
-				row.text("{:01}/{:01}", std::min(stplyr->laps, numlaps), numlaps);
+				row.text("{:01}/{:01}", std::min<INT32>(stplyr->laps, numlaps), numlaps);
 			else
-				row.text("{:02}/{:02}", std::min(stplyr->laps, numlaps), numlaps);
+				row.text("{:02}/{:02}", std::min<INT32>(stplyr->laps, numlaps), numlaps);
 
-			// V_DrawTimerString(LAPS_X+33, LAPS_Y+3, V_HUDTRANS|V_SLIDEIN|splitflags, va("%d/%d", std::min(stplyr->laps, numlaps), numlaps));
+			// V_DrawTimerString(LAPS_X+33, LAPS_Y+3, V_HUDTRANS|V_SLIDEIN|splitflags, va("%d/%d", std::min<INT32>(stplyr->laps, numlaps), numlaps));
 		}
 	}
 
@@ -4424,7 +4426,7 @@ static void K_drawRingCounter(boolean gametypeinfoshown)
 
 			if (stplyr->amps)
 			{
-				UINT8 amplevel = std::min(stplyr->amps / AMPLEVEL, 6);
+				UINT8 amplevel = std::min<INT32>(stplyr->amps / AMPLEVEL, 6);
 
 				V_DrawMappedPatch(fr-ampx, fy-3-ampy, V_HUDTRANS|V_SLIDEIN|splitflags, kp_amps[amplevel][leveltime%12], R_GetTranslationColormap(TC_RAINBOW, static_cast<skincolornum_t>(stplyr->skincolor), GTC_CACHE));
 				if (amplevel == 6)
@@ -4518,7 +4520,7 @@ static void K_drawRingCounter(boolean gametypeinfoshown)
 
 			if (stplyr->amps)
 			{
-				UINT8 amplevel = std::min(stplyr->amps / AMPLEVEL, 6);
+				UINT8 amplevel = std::min<INT32>(stplyr->amps / AMPLEVEL, 6);
 
 				V_DrawMappedPatch(LAPS_X+7-7, fy-5-8, V_HUDTRANS|V_SLIDEIN|splitflags, kp_amps[amplevel][leveltime%12], R_GetTranslationColormap(TC_RAINBOW, static_cast<skincolornum_t>(stplyr->skincolor), GTC_CACHE));
 				if (amplevel == 6)
@@ -4812,9 +4814,9 @@ static void K_drawBlueSphereMeter(boolean gametypeinfoshown)
 	const UINT8 maxBars = 4;
 	// see also K_DrawNameTagSphereMeter
 	const UINT8 segColors[] = {73, 64, 52, 54, 55, 35, 34, 33, 202, 180, 181, 182, 164, 165, 166, 153, 152};
-	const UINT8 sphere = std::clamp(static_cast<int>(stplyr->spheres), 0, 40);
+	const UINT8 sphere = std::clamp<INT32>(static_cast<int>(stplyr->spheres), 0, 40);
 
-	UINT8 numBars = std::min((sphere / 10), +maxBars);
+	UINT8 numBars = std::min<INT32>((sphere / 10), +maxBars);
 	UINT8 colorIndex = (sphere * sizeof(segColors)) / (40 + 1);
 	INT32 fx, fy;
 	UINT8 i;
@@ -4915,14 +4917,14 @@ static void K_drawBlueSphereMeter(boolean gametypeinfoshown)
 
 		if (r_splitscreen < 2)
 		{
-			V_DrawFill(fx, fy + 6, segLen, 3, segColors[std::max(colorIndex-1, 0)] | splitflags);
-			V_DrawFill(fx, fy + 7, segLen, 1, segColors[std::max(colorIndex-2, 0)] | splitflags);
+			V_DrawFill(fx, fy + 6, segLen, 3, segColors[std::max<INT32>(colorIndex-1, 0)] | splitflags);
+			V_DrawFill(fx, fy + 7, segLen, 1, segColors[std::max<INT32>(colorIndex-2, 0)] | splitflags);
 			V_DrawFill(fx, fy + 9, segLen, 3, segColors[colorIndex] | splitflags);
 		}
 		else
 		{
-			V_DrawFill(fx, fy + 5, segLen, 1, segColors[std::max(colorIndex-1, 0)] | splitflags);
-			V_DrawFill(fx, fy + 6, segLen, 1, segColors[std::max(colorIndex-2, 0)] | splitflags);
+			V_DrawFill(fx, fy + 5, segLen, 1, segColors[std::max<INT32>(colorIndex-1, 0)] | splitflags);
+			V_DrawFill(fx, fy + 6, segLen, 1, segColors[std::max<INT32>(colorIndex-2, 0)] | splitflags);
 			V_DrawFill(fx, fy + 7, segLen, 2, segColors[colorIndex] | splitflags);
 		}
 
@@ -5402,8 +5404,8 @@ static void K_DrawNameTagSphereMeter(INT32 x, INT32 y, INT32 width, INT32 sphere
 
 		Draw seg = bar.width(b);
 
-		seg.fill(segColors[std::max(colorIndex - 1, 0)]);
-		seg.y(vid.dupy).fill(segColors[std::max(colorIndex - 2, 0)]);
+		seg.fill(segColors[std::max<INT32>(colorIndex - 1, 0)]);
+		seg.y(vid.dupy).fill(segColors[std::max<INT32>(colorIndex - 2, 0)]);
 		seg.y(2 * vid.dupy).height(2 * vid.dupy).fill(segColors[colorIndex]);
 		seg.y(4 * vid.dupy).fill(31);
 
@@ -6631,7 +6633,7 @@ static void K_drawKartFinish(boolean finish)
 		x = ((vid.width<<FRACBITS)/vid.dupx);
 		xval = (SHORT(kptodraw[pnum]->width)<<FRACBITS);
 
-		pwidth = std::max(xval, x);
+		pwidth = std::max<INT32>(xval, x);
 
 		x = ((TICRATE - timer) * pwidth) / TICRATE;
 		ox = ((TICRATE - (timer - 1)) * pwidth) / TICRATE;
@@ -7089,7 +7091,7 @@ static void K_drawInput(void)
 		constexpr tic_t kDelay = 2u;
 		// See K_drawBossHealthBar
 		tic_t start = lt_endtime - 1u;
-		tic_t t = std::clamp(lt_ticker, start, start + kDelay) - start;
+		tic_t t = std::clamp<INT32>(lt_ticker, start, start + kDelay) - start;
 		def[0][1] -= 24 + Easing_Linear(t * FRACUNIT / kDelay, 0, 7);
 	}
 
@@ -7140,12 +7142,12 @@ static void K_drawLapStartAnim(void)
 
 	fixed_t interpx, interpy, newval, oldval;
 
-	newval = (BASEVIDWIDTH/2 + (32 * std::max(0, t - 76))) * FRACUNIT;
-	oldval = (BASEVIDWIDTH/2 + (32 * std::max(0, tOld - 76))) * FRACUNIT;
+	newval = (BASEVIDWIDTH/2 + (32 * std::max<INT32>(0, t - 76))) * FRACUNIT;
+	oldval = (BASEVIDWIDTH/2 + (32 * std::max<INT32>(0, tOld - 76))) * FRACUNIT;
 	interpx = R_InterpolateFixed(oldval, newval);
 
-	newval = (48 - (32 * std::max(0, progress - 76))) * FRACUNIT;
-	oldval = (48 - (32 * std::max(0, progressOld - 76))) * FRACUNIT;
+	newval = (48 - (32 * std::max<INT32>(0, progress - 76))) * FRACUNIT;
+	oldval = (48 - (32 * std::max<INT32>(0, progressOld - 76))) * FRACUNIT;
 	interpy = R_InterpolateFixed(oldval, newval);
 
 	INT32 hudtransflags = (camera[R_GetViewNumber()].chaseheight > HUDTRANS_CAMHEIGHT_MAX) ? V_HUDTRANSHALF : V_HUDTRANS;
@@ -7169,66 +7171,66 @@ static void K_drawLapStartAnim(void)
 
 	if (stplyr->latestlap == (UINT8)(numlaps))
 	{
-		newval = (62 - (32 * std::max(0, progress - 76))) * FRACUNIT;
-		oldval = (62 - (32 * std::max(0, progressOld - 76))) * FRACUNIT;
+		newval = (62 - (32 * std::max<INT32>(0, progress - 76))) * FRACUNIT;
+		oldval = (62 - (32 * std::max<INT32>(0, progressOld - 76))) * FRACUNIT;
 		interpx = R_InterpolateFixed(oldval, newval);
 
 		V_DrawFixedPatch(
 			interpx, // 27
 			30*FRACUNIT, // 24
 			FRACUNIT, V_SNAPTOTOP|hudtransflags,
-			kp_lapanim_final[std::min(progress/2, 10)], NULL);
+			kp_lapanim_final[std::min<INT32>(progress/2, 10)], NULL);
 
 		if (progress/2-12 >= 0)
 		{
-			newval = (188 + (32 * std::max(0, progress - 76))) * FRACUNIT;
-			oldval = (188 + (32 * std::max(0, progressOld - 76))) * FRACUNIT;
+			newval = (188 + (32 * std::max<INT32>(0, progress - 76))) * FRACUNIT;
+			oldval = (188 + (32 * std::max<INT32>(0, progressOld - 76))) * FRACUNIT;
 			interpx = R_InterpolateFixed(oldval, newval);
 
 			V_DrawFixedPatch(
 				interpx, // 194
 				30*FRACUNIT, // 24
 				FRACUNIT, V_SNAPTOTOP|hudtransflags,
-				kp_lapanim_lap[std::min(progress/2-12, 6)], NULL);
+				kp_lapanim_lap[std::min<INT32>(progress/2-12, 6)], NULL);
 		}
 	}
 	else
 	{
-		newval = (82 - (32 * std::max(0, progress - 76))) * FRACUNIT;
-		oldval = (82 - (32 * std::max(0, progressOld - 76))) * FRACUNIT;
+		newval = (82 - (32 * std::max<INT32>(0, progress - 76))) * FRACUNIT;
+		oldval = (82 - (32 * std::max<INT32>(0, progressOld - 76))) * FRACUNIT;
 		interpx = R_InterpolateFixed(oldval, newval);
 
 		V_DrawFixedPatch(
 			interpx, // 61
 			30*FRACUNIT, // 24
 			FRACUNIT, V_SNAPTOTOP|hudtransflags,
-			kp_lapanim_lap[std::min(progress/2, 6)], NULL);
+			kp_lapanim_lap[std::min<INT32>(progress/2, 6)], NULL);
 
 		if (progress/2-8 >= 0)
 		{
-			newval = (188 + (32 * std::max(0, progress - 76))) * FRACUNIT;
-			oldval = (188 + (32 * std::max(0, progressOld - 76))) * FRACUNIT;
+			newval = (188 + (32 * std::max<INT32>(0, progress - 76))) * FRACUNIT;
+			oldval = (188 + (32 * std::max<INT32>(0, progressOld - 76))) * FRACUNIT;
 			interpx = R_InterpolateFixed(oldval, newval);
 
-			UINT32 sanitizedlaps = std::min((UINT32)99, (UINT32)stplyr->latestlap);
+			UINT32 sanitizedlaps = std::min<INT32>((UINT32)99, (UINT32)stplyr->latestlap);
 
 			V_DrawFixedPatch(
 				interpx, // 194
 				30*FRACUNIT, // 24
 				FRACUNIT, V_SNAPTOTOP|hudtransflags,
-				kp_lapanim_number[(sanitizedlaps / 10)][std::min(progress/2-8, 2)], NULL);
+				kp_lapanim_number[(sanitizedlaps / 10)][std::min<INT32>(progress/2-8, 2)], NULL);
 
 			if (progress/2-10 >= 0)
 			{
-				newval = (208 + (32 * std::max(0, progress - 76))) * FRACUNIT;
-				oldval = (208 + (32 * std::max(0, progressOld - 76))) * FRACUNIT;
+				newval = (208 + (32 * std::max<INT32>(0, progress - 76))) * FRACUNIT;
+				oldval = (208 + (32 * std::max<INT32>(0, progressOld - 76))) * FRACUNIT;
 				interpx = R_InterpolateFixed(oldval, newval);
 
 				V_DrawFixedPatch(
 					interpx, // 221
 					30*FRACUNIT, // 24
 					FRACUNIT, V_SNAPTOTOP|hudtransflags,
-					kp_lapanim_number[(sanitizedlaps % 10)][std::min(progress/2-10, 2)], NULL);
+					kp_lapanim_number[(sanitizedlaps % 10)][std::min<INT32>(progress/2-10, 2)], NULL);
 			}
 		}
 	}

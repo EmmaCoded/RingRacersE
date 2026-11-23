@@ -576,6 +576,7 @@ void PR_LoadProfiles(void)
 			converted = true;
 		}
 
+
 		if (converted)
 		{
 			CONS_Printf("Profile '%s' was converted from version %d to version %d\n",
